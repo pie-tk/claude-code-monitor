@@ -232,9 +232,28 @@ body {
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--status-unknown, var(--subtle-text));
+  transform: scale(1);
+  transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, opacity 0.18s ease;
 }
-.session-tab-dot.busy { background: var(--status-busy); }
-.session-tab-dot.idle { background: var(--status-idle); }
+.session-tab-dot.busy {
+  background: var(--status-busy);
+  animation: session-busy-shuttle 0.9s ease-in-out infinite alternate;
+}
+.session-tab-dot.idle {
+  background: var(--status-idle);
+  animation: none;
+  box-shadow: none;
+}
+@keyframes session-busy-shuttle {
+  from {
+    transform: translateX(-2px);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--status-busy) 42%, transparent);
+  }
+  to {
+    transform: translateX(2px);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--status-busy) 55%, transparent);
+  }
+}
 .session-tab-info {
   display: flex;
   flex-direction: column;
@@ -1848,9 +1867,24 @@ body.dark .chat-tool-result.err .chat-tool-result-text { color: #FF7369; }
   border-left: 1px solid var(--divider);
   background: var(--panel-bg);
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: var(--card-border) transparent;
   box-shadow: -8px 0 14px -14px rgba(0,0,0,0.28);
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+  transition: width 0.22s ease, flex-basis 0.22s ease, opacity 0.18s ease, transform 0.22s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.chat-change-panel.collapsed {
+  width: 0 !important;
+  flex-basis: 0 !important;
+  min-width: 0;
+  opacity: 0;
+  transform: translateX(16px);
+  border-left-color: transparent;
+  box-shadow: none;
+  pointer-events: none;
 }
 .chat-change-resizer {
   position: absolute;
@@ -1861,6 +1895,13 @@ body.dark .chat-tool-result.err .chat-tool-result-text { color: #FF7369; }
   transform: translateX(6px);
   cursor: col-resize;
   z-index: 3;
+  opacity: 1;
+  pointer-events: auto;
+  transition: right 0.22s ease, opacity 0.18s ease;
+}
+.chat-change-resizer.collapsed {
+  opacity: 0;
+  pointer-events: none;
 }
 .chat-change-resizer::before {
   content: '';
@@ -2403,9 +2444,80 @@ body.dark .chat-tool-result.err .chat-tool-result-text { color: #FF7369; }
   color: var(--accent);
   font-weight: 600;
 }
+.quick-reply-btn.ask-custom.primary,
+.quick-reply-btn.ask-custom.primary .ask-option-label,
+.quick-reply-btn.ask-custom.primary .ask-option-desc {
+  color: #FFF;
+}
 .quick-reply-btn.ask-custom:hover { background: var(--accent-soft); }
 
-/* 自定义输入态横幅 */
+/* Type something 内联输入:确定只发送文本,再次点击自定义项才选择 */
+.ask-custom-inline {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.ask-custom-inline-label {
+  font-size: 9pt;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ask-custom-inline-input {
+  min-width: 0;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 9pt;
+  color: var(--window-text);
+  background: var(--window-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  outline: none;
+}
+.ask-custom-inline-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.quick-reply-btn.ask-custom-ok {
+  background: var(--accent);
+  color: #FFF;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.quick-reply-btn.ask-custom-cancel {
+  background: var(--card-bg);
+  color: var(--secondary-text);
+}
+.ask-custom-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: stretch;
+}
+.ask-custom-row .ask-custom-value {
+  min-width: 0;
+}
+.quick-reply-btn.ask-custom-edit {
+  border-radius: 8px;
+  color: var(--secondary-text);
+  background: var(--card-bg);
+  padding: 8px 12px;
+  align-self: stretch;
+}
+.quick-reply-btn.ask-custom-edit:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 自定义输入态横幅（旧缓存/旧 DOM 兜底） */
 .ask-custom-banner {
   width: 100%;
   display: flex;

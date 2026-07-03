@@ -60,17 +60,22 @@ var (
 const eventTypeKey = 0x0001 // INPUT_RECORD::EventType == KEY_EVENT
 
 const (
+	vkBack    = 0x08
+	vkTab     = 0x09
 	vkReturn  = 0x0D
 	vkEscape  = 0x1B
+	vkSpace   = 0x20
 	vkLeft    = 0x25
 	vkUp      = 0x26
 	vkRight   = 0x27
 	vkDown    = 0x28
-	vkSpace   = 0x20
-	vkTab     = 0x09
+	vkDelete  = 0x2E
+	vkA       = 0x41
 	swRestore = 9 // SW_RESTORE
 	wmClose   = 0x0010
 )
+
+const leftCtrlPressed = 0x0008 // KEY_EVENT_RECORD::dwControlKeyState LEFT_CTRL_PRESSED
 
 // keyEventRecord 严格对应 Win32 KEY_EVENT_RECORD（16 字节，无填充）。
 type keyEventRecord struct {
@@ -96,14 +101,18 @@ type inputRecord struct {
 // 方向键被目标进程忽略(实测:Claude Code 终端选单点中间项无效,只回车选了第一项)。
 func vkToScanCode(vk uint16) uint16 {
 	switch vk {
-	case vkEscape:
-		return 0x01
+	case vkBack:
+		return 0x0E
 	case vkTab:
 		return 0x0F
 	case vkReturn:
 		return 0x1C
+	case vkEscape:
+		return 0x01
 	case vkSpace:
 		return 0x39
+	case vkA:
+		return 0x1E
 	case vkLeft:
 		return 0x4B
 	case vkUp:
@@ -112,17 +121,24 @@ func vkToScanCode(vk uint16) uint16 {
 		return 0x4D
 	case vkDown:
 		return 0x50
+	case vkDelete:
+		return 0x53
 	}
 	return 0
 }
 
 func makeKeyRecord(down bool, vk uint16, ch uint16) inputRecord {
+	return makeKeyRecordWithState(down, vk, ch, 0)
+}
+
+func makeKeyRecordWithState(down bool, vk uint16, ch uint16, controlState uint32) inputRecord {
 	kev := keyEventRecord{
-		bKeyDown:         boolToInt32(down),
-		wRepeatCount:     1,
-		wVirtualKeyCode:  vk,
-		wVirtualScanCode: vkToScanCode(vk),
-		uChar:            ch,
+		bKeyDown:          boolToInt32(down),
+		wRepeatCount:      1,
+		wVirtualKeyCode:   vk,
+		wVirtualScanCode:  vkToScanCode(vk),
+		uChar:             ch,
+		dwControlKeyState: controlState,
 	}
 	var ir inputRecord
 	ir.eventType = eventTypeKey
@@ -314,6 +330,19 @@ func arrowRecord(vk uint16) []inputRecord {
 	}
 }
 
+func ctrlARecords() []inputRecord {
+	return []inputRecord{
+		makeKeyRecordWithState(true, vkA, 0x01, leftCtrlPressed),
+		makeKeyRecordWithState(false, vkA, 0x01, leftCtrlPressed),
+	}
+}
+
+func clearInputRecords() []inputRecord {
+	recs := ctrlARecords()
+	recs = append(recs, arrowRecord(vkBack)...)
+	return recs
+}
+
 // keyTokenRecords 把单个控制键 token 翻译为输入记录。
 // 方向键走 KEY_EVENT(虚拟键码 + 扫描码);空格/Tab 走字符注入;回车走 VK_RETURN。
 // 调试按钮可逐个发送,用于摸清 claude 终端对各键的真实响应。
@@ -327,6 +356,16 @@ func keyTokenRecords(key string) ([]inputRecord, error) {
 		return arrowRecord(vkUp), nil
 	case "down":
 		return arrowRecord(vkDown), nil
+	case "backspace":
+		return arrowRecord(vkBack), nil
+	case "delete":
+		return arrowRecord(vkDelete), nil
+	case "esc":
+		return arrowRecord(vkEscape), nil
+	case "ctrl+a":
+		return ctrlARecords(), nil
+	case "clearInput":
+		return clearInputRecords(), nil
 	case "space":
 		return textRecords(" "), nil
 	case "tab":

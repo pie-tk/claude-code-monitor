@@ -24,7 +24,7 @@ type Settings struct {
 	WindowMaximised          bool             `json:"windowMaximised"`          // 主窗口上次是否最大化
 	SortField                string           `json:"sortField"`                // 实例列表排序字段：updatedAt | startedAt | contextTokens
 	SortDir                  string           `json:"sortDir"`                  // 排序方向：asc | desc
-	ViewMode                 string           `json:"viewMode"`                 // 主区布局：list(实例卡片列表，默认) | chat(左会话标签 + 右对话)
+	ViewMode                 string           `json:"viewMode"`                 // 主区布局：list(实例卡片列表) | chat(左会话标签 + 右对话，默认)
 	ShowSessionSubtitle      bool             `json:"showSessionSubtitle"`      // chat 布局会话标签是否显示目录副标题（默认 true）
 }
 
@@ -53,7 +53,7 @@ func LoadSettings() error {
 		LaunchYolo:               true,        // 默认 yolo 模式（跳过权限确认）
 		SortField:                "updatedAt", // 默认按最后活动排序
 		SortDir:                  "desc",      // 默认降序（最新在前）
-		ViewMode:                 "list",      // 默认实例卡片列表布局
+		ViewMode:                 "chat",      // 默认会话布局（左会话标签 + 右对话）
 		ShowSessionSubtitle:      true,        // 默认显示会话目录副标题
 	}
 

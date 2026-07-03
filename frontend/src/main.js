@@ -92,17 +92,21 @@ let askQuestionCount = 0;
 // AskUserQuestion 已选答案记忆：key = askToolUseId + '#' + askQuestionIndex。
 // value 结构：
 //   { kind:'single', optionIndex:number, label:string }
-//   { kind:'multi', picks:{optionIndex:true}, labels:string[] }
+//   { kind:'multi', picks:{optionIndex:true}, labels:string[], customSelected?:boolean, customText?:string }
 //   { kind:'custom', text:string }
-// 用于切回题目时恢复高亮/勾选/自定义横幅，避免默认又亮第一个选项。
+// 这里只记录“真正选择/提交”的答案；Type something 文本本身单独存 askCustomOptions。
 let askAnswers = {};
-// 多选勾选态：key = askToolUseId + '#' + askQuestionIndex，value = {optionIndex: true}。
-// 用 tool_use id + 题号隔离；轮询重渲染时不进签名，勾选靠就地翻转 class 保留（见 toggleAskPick）。
+// 多选勾选态：key = askToolUseId + '#' + askQuestionIndex，value = {picks:{optionIndex:true}, customSelected:boolean}。
+// 用 tool_use id + 题号隔离；轮询重渲染时不进签名，勾选靠就地翻转 class 保留（见 toggleAskPick/toggleAskCustomPick）。
 let askMultiSelectPicks = {};
-// Type something 自定义输入态：askCustomPending=true 时，下次发送走自定义答案而非普通 prompt。
-// askCustomQuestionIndex 记录是为哪一题输入（切题/关面板时重置）。
-let askCustomPending = false;
-let askCustomQuestionIndex = 0;
+// Type something 已创建的自定义选项：key = askToolUseId + '#' + askQuestionIndex，value = {text:string}。
+// “输入自定义文本”和“选择该自定义项”分成两步：确定只写入 Type something，之后再次点击自定义项才算选择。
+let askCustomOptions = {};
+// Type something 内联编辑器态：{ key, questionIndex, mode:'create'|'edit', draft }；null 表示未编辑。
+let askCustomEditor = null;
+// 终端 AskUserQuestion TUI 的焦点位置估计：key → item index（原始选项 0..n-1，自定义项 n，Type something n(+1)）。
+// 由于终端状态无法读回，所有由本应用发出的导航都在这里做乐观同步。
+let askTerminalFocus = {};
 // AskUserQuestion 实时旁路:活跃会话 JSONL 不落盘(2.1.169+),AskUserQuestion 的 questions
 // 只能由 PreToolUse hook 实时捕获(后端 ask/<pid>.json,经 GetChatHistory.pendingAsk 透传)。
 // detectInteraction 在 JSONL 找不到挂起 tool_use 时回退用它合成 kind:'ask'。null=无挂起。
@@ -149,9 +153,9 @@ let dirFilterHidden = {};
 let dirFilterSig = '';   // 唯一目录签名，变化时才重建下拉 DOM（避免每秒刷新抖动）
 
 // ---- 主区布局状态（list 实例卡片列表 / chat 左会话标签 + 右对话），持久化到 settings.viewMode ----
-let viewMode = 'list';          // 当前布局：list | chat
+let viewMode = 'chat';          // 当前布局：list | chat（首次使用默认会话布局）
 let liveStalePids = [];         // 排序后的运行中实例 pid 列表（renderCards 每秒更新），供会话标签渲染
-let sessionTabsSig = '';        // 会话标签签名（pid+topic+副标题+选中），变化才重建 DOM
+let sessionTabsSig = '';        // 会话标签结构签名；结构稳定时仅局部刷新状态，避免每秒重建 DOM
 let showSessionSubtitle = true; // chat 布局会话标签是否显示目录副标题
 let closingPids = {};            // 正在关闭的实例 pid，防重复点击
 
@@ -323,9 +327,13 @@ function repositionChatChangeResizer() {
   if (!resizer) return;
   if (!panel || panel.classList.contains('hidden')) {
     resizer.classList.add('hidden');
+    resizer.classList.remove('collapsed');
     return;
   }
-  resizer.style.right = chatChangePanelWidth + 'px';
+  var collapsed = panel.classList.contains('collapsed');
+  resizer.classList.remove('hidden');
+  resizer.classList.toggle('collapsed', collapsed);
+  resizer.style.right = collapsed ? '0px' : (chatChangePanelWidth + 'px');
 }
 
 function applyChatChangePanelWidth() {
@@ -336,6 +344,30 @@ function applyChatChangePanelWidth() {
     panel.style.flexBasis = chatChangePanelWidth + 'px';
   }
   repositionChatChangeResizer();
+}
+
+// setChatChangePanelDomState 区分“无修改项隐藏”和“用户隐藏时折叠”，折叠态保留 DOM 才能做过渡动画。
+function setChatChangePanelDomState(hasChanges) {
+  var panel = document.getElementById('chat-change-panel');
+  var resizer = document.getElementById('chat-change-resizer');
+  if (!panel) return;
+  if (!hasChanges) {
+    panel.classList.add('hidden');
+    panel.classList.remove('collapsed');
+    if (resizer) {
+      resizer.classList.add('hidden');
+      resizer.classList.remove('collapsed');
+    }
+    return;
+  }
+  panel.classList.remove('hidden');
+  panel.classList.toggle('collapsed', !chatChangePanelVisible);
+  if (resizer) {
+    resizer.classList.remove('hidden');
+    resizer.classList.toggle('collapsed', !chatChangePanelVisible);
+  }
+  if (chatChangePanelVisible) applyChatChangePanelWidth();
+  else repositionChatChangeResizer();
 }
 
 function syncChatChangePanelVisibilityFromPrefs(pid) {
@@ -420,8 +452,57 @@ window.toggleSessionSubtitle = function(val) {
   renderSessionTabs();
 };
 
-// renderSessionTabs 渲染左侧会话标签列表。签名（pid+topic+副标题+选中）变化才重建 DOM，
-// 避免每秒刷新抖动；仅在 chat 模式调用。
+function sessionStatusClass(status) {
+  return status === 'busy' || status === 'idle' ? status : 'unknown';
+}
+
+function sessionWaitingInfo(waitingKind) {
+  if (waitingKind === 'ask') return { title: '等待选择', badge: '待选' };
+  if (waitingKind === 'plan') return { title: '等待计划审批', badge: '审批' };
+  if (waitingKind === 'permission') return { title: '等待权限确认', badge: '授权' };
+  return { title: '', badge: '' };
+}
+
+// updateSessionTabState 每秒轻量刷新状态类，避免结构签名不变时 busy/idle 圆点滞后。
+function updateSessionTabState(el, pid) {
+  var m = instanceMeta[pid] || {};
+  var topic = m.topic || '<新会话>';
+  var status = sessionStatusClass(m.status || 'unknown');
+  var waitingKind = m.waitingKind || '';
+  var info = sessionWaitingInfo(waitingKind);
+
+  el.classList.toggle('active', pid === chatPanelPid);
+  el.classList.toggle('waiting', !!waitingKind);
+  el.classList.toggle('closing', !!closingPids[pid]);
+  var staleWaiting = [];
+  for (var i = 0; i < el.classList.length; i++) {
+    var cls = el.classList.item(i);
+    if (cls && cls.indexOf('waiting-') === 0) staleWaiting.push(cls);
+  }
+  for (var j = 0; j < staleWaiting.length; j++) el.classList.remove(staleWaiting[j]);
+  if (waitingKind) el.classList.add('waiting-' + waitingKind);
+  el.title = info.title ? (info.title + ' · ' + topic) : topic;
+
+  var dot = el.querySelector('.session-tab-dot');
+  if (dot) {
+    dot.classList.toggle('busy', status === 'busy');
+    dot.classList.toggle('idle', status === 'idle');
+    dot.classList.toggle('unknown', status === 'unknown');
+  }
+  var badge = el.querySelector('.session-tab-wait-badge');
+  if (badge) badge.textContent = info.badge;
+}
+
+function updateSessionTabsState(listEl) {
+  var items = listEl.querySelectorAll('.session-tab');
+  for (var i = 0; i < items.length; i++) {
+    var pid = Number(items[i].getAttribute('data-pid'));
+    if (!isNaN(pid)) updateSessionTabState(items[i], pid);
+  }
+}
+
+// renderSessionTabs 渲染左侧会话标签列表。结构签名（pid+topic+副标题等）变化才重建 DOM，
+// 状态类（busy/idle/active/closing）每秒就地刷新，避免状态点滞后。
 function renderSessionTabs() {
   var listEl = document.getElementById('session-tabs-list');
   var emptyEl = document.getElementById('session-tabs-empty');
@@ -440,37 +521,35 @@ function renderSessionTabs() {
     var m = instanceMeta[p]; return (m && m.waitingKind) ? m.waitingKind : '';
   });
   var closing = liveStalePids.map(function(p) { return closingPids[p] ? '1' : ''; });
-  // 签名含副标题（目录）与显示开关：开关切换或目录变化才重建
+  // 签名含副标题（目录）与显示开关：开关切换或目录变化才重建。active/status 走局部刷新。
   var subs = showSessionSubtitle ? liveStalePids.map(function(p) {
     var m = instanceMeta[p]; return (m && m.cwd) ? m.cwd : '';
   }).join('⊥') : '';
-  var sig = liveStalePids.join(',') + '|' + topics.join('⊕') + '|' + waiting.join('⊙') + '|' + closing.join('⊗') + '|' + subs + '|' + (chatPanelPid || '');
-  if (sig === sessionTabsSig) return;
+  var sig = liveStalePids.join(',') + '|' + topics.join('⊕') + '|' + waiting.join('⊙') + '|' + closing.join('⊗') + '|' + subs;
+  if (sig === sessionTabsSig && listEl.children.length === liveStalePids.length) {
+    updateSessionTabsState(listEl);
+    return;
+  }
   sessionTabsSig = sig;
   var html = '';
   for (var i = 0; i < liveStalePids.length; i++) {
     var pid = liveStalePids[i];
     var m = instanceMeta[pid] || {};
     var topic = m.topic || '<新会话>';
-    var status = m.status || 'unknown';
+    var status = sessionStatusClass(m.status || 'unknown');
     var waitingKind = m.waitingKind || '';
     var active = pid === chatPanelPid ? ' active' : '';
     var waitingCls = waitingKind ? (' waiting waiting-' + waitingKind) : '';
     var closingCls = closingPids[pid] ? ' closing' : '';
-    var waitingTitle = waitingKind === 'ask' ? '等待选择'
-      : waitingKind === 'plan' ? '等待计划审批'
-      : waitingKind === 'permission' ? '等待权限确认' : '';
-    var waitingBadge = waitingKind === 'ask' ? '待选'
-      : waitingKind === 'plan' ? '审批'
-      : waitingKind === 'permission' ? '授权' : '';
+    var info = sessionWaitingInfo(waitingKind);
     var sub = (showSessionSubtitle && m.cwd) ? '<span class="session-tab-sub">' + escHtml(cwdTitle(m.cwd)) + '</span>' : '';
-    html += '<div class="session-tab' + active + waitingCls + closingCls + '" data-pid="' + pid + '" onclick="selectSession(' + pid + ')" title="' + escAttr(waitingTitle ? (waitingTitle + ' · ' + topic) : topic) + '">'
+    html += '<div class="session-tab' + active + waitingCls + closingCls + '" data-pid="' + pid + '" onclick="selectSession(' + pid + ')" title="' + escAttr(info.title ? (info.title + ' · ' + topic) : topic) + '">'
       + '<span class="session-tab-dot ' + status + '"></span>'
       + '<span class="session-tab-info">'
       + '<span class="session-tab-name">' + escHtml(topic) + '</span>'
       + sub
       + '</span>'
-      + (waitingBadge ? '<span class="session-tab-wait-badge">' + waitingBadge + '</span>' : '')
+      + (info.badge ? '<span class="session-tab-wait-badge">' + info.badge + '</span>' : '')
       + '<button class="session-tab-close" onclick="handleCloseSession(event, ' + pid + ')" title="关闭该 Claude Code">×</button>'
       + '</div>';
   }
@@ -2895,9 +2974,12 @@ window.closeChatPanel = function(opts) {
   markdownDownloads = {};
   renderChangePanel([]);
   var resizer = document.getElementById('chat-change-resizer');
-  if (resizer) resizer.classList.add('hidden');
+  if (resizer) {
+    resizer.classList.add('hidden');
+    resizer.classList.remove('collapsed');
+  }
   procReset();
-  askCustomPending = false; // 关面板清掉自定义输入态
+  askCustomEditor = null; // 关面板清掉内联自定义编辑器态
   // 不重置 ask 多问追踪(保留中途进度,重开面板可续上)
   if (chatRefreshTimer) { clearInterval(chatRefreshTimer); chatRefreshTimer = null; }
 };
@@ -2986,22 +3068,16 @@ function renderChangePanel(changes) {
   changes = changes || [];
   var panel = document.getElementById('chat-change-panel');
   var btn = document.getElementById('chat-change-toggle-btn');
-  var resizer = document.getElementById('chat-change-resizer');
   if (!panel || !btn) return;
   if (changes.length === 0) {
-    panel.classList.add('hidden');
-    if (resizer) resizer.classList.add('hidden');
+    setChatChangePanelDomState(false);
     btn.classList.add('hidden');
     btn.textContent = '修改';
     return;
   }
   btn.classList.remove('hidden');
   btn.textContent = (chatChangePanelVisible ? '隐藏修改' : '显示修改') + ' · ' + changes.length;
-  panel.classList.toggle('hidden', !chatChangePanelVisible);
-  if (resizer) resizer.classList.toggle('hidden', !chatChangePanelVisible);
-  repositionChatChangeResizer();
-  if (!chatChangePanelVisible) return;
-  applyChatChangePanelWidth();
+  setChatChangePanelDomState(true);
 
   var byFile = {};
   var order = [];
@@ -3051,7 +3127,7 @@ window.focusChange = function(id) {
       el.classList.add('flash');
       setTimeout(function() { el.classList.remove('flash'); }, 1200);
     }
-  }, 0);
+  }, 180);
 };
 
 window.downloadMarkdownMessage = async function(id) {
@@ -3126,11 +3202,6 @@ window.sendChatMessage = async function() {
   var text = input.value.trim();
   if (!text) return;
 
-  // Type something 自定义输入态:走按键序列提交(不走普通 prompt)
-  if (askCustomPending) {
-    return submitAskCustom(text);
-  }
-
   var btn = document.getElementById("chat-send-btn");
   btn.disabled = true;
   btn.textContent = "发送中...";
@@ -3172,8 +3243,7 @@ window.sendChatMessage = async function() {
 function injectInteractivePrompts(messages) {
   var waitingEl = document.getElementById("chat-waiting");
   var repliesEl = document.getElementById("chat-quick-replies");
-  // Type something 自定义输入态:保持 banner,不重写选项区(用户正在下方输入框输入)
-  if (askCustomPending) return;
+  // Type something 内联编辑器也在 quick replies 内渲染，轮询时靠签名避免重写用户正在输入的内容。
   if (!messages || messages.length === 0) {
     waitingEl.classList.add("hidden");
     repliesEl.classList.add("hidden");
@@ -3197,6 +3267,9 @@ function injectInteractivePrompts(messages) {
       askQuestionCount = (info.askQuestions || []).length;
       askAnswers = {}; // 新一轮提问,清空旧答案记忆
       askMultiSelectPicks = {}; // 新一轮提问,清空旧多选勾选(防泄漏)
+      askCustomOptions = {}; // 新一轮提问,清空旧 Type something 文本
+      askCustomEditor = null;
+      askTerminalFocus = {};
     }
     var qs = info.askQuestions || [];
     if (askQuestionIndex < qs.length) {
@@ -3219,6 +3292,9 @@ function injectInteractivePrompts(messages) {
     askQuestionCount = 0;
     askAnswers = {};
     askMultiSelectPicks = {};
+    askCustomOptions = {};
+    askCustomEditor = null;
+    askTerminalFocus = {};
   }
 
   // 交互暂停点判定:
@@ -3247,19 +3323,25 @@ function injectInteractivePrompts(messages) {
   }
 
   // 生成快速回复按钮(签名去重:每秒轮询重评估时,结构不变就不重写 innerHTML)
-  // 签名只描述结构(题号 + 多选标志 + 选项列表),不含勾选态——勾选靠就地翻转 class,
-  // 避免每秒轮询重写 innerHTML 冲掉用户的多选勾选(见 toggleAskPick)。
+  // 签名只描述结构(题号 + 多选标志 + 选项列表 + 自定义项/编辑器),不含勾选态——
+  // 勾选靠就地翻转 class,避免每秒轮询重写 innerHTML 冲掉用户操作。
   var askMulti = info.kind === 'ask' && info.buttons.length > 0 && info.buttons[0].multi;
+  var customOpt = info.kind === 'ask' ? currentAskCustomOption() : null;
+  var editorOpen = info.kind === 'ask' && askCustomEditor && askCustomEditor.key === askAnswerKey();
   var sig = info.kind;
-  if (info.kind === 'ask') sig += '#' + askQuestionIndex + '|m=' + (askMulti ? 1 : 0);
+  if (info.kind === 'ask') {
+    sig += '#' + askQuestionIndex + '|m=' + (askMulti ? 1 : 0)
+      + '|custom=' + (customOpt ? customOpt.text : '')
+      + '|editor=' + (editorOpen ? askCustomEditor.mode : '');
+  }
   sig += '|' + info.buttons.map(function(b) { return (b.optionIndex != null ? b.optionIndex : b.value); }).join(',');
   if (sig !== lastReplySignature) {
-    // 选项是否带说明文字(AskUserQuestion 的 option.description),或多选(需纵向勾选卡片)。
+    // 选项是否带说明文字(AskUserQuestion 的 option.description),或多选/自定义项(需纵向卡片)。
     var hasDesc = false;
     for (var j = 0; j < info.buttons.length; j++) {
       if (info.buttons[j].desc) { hasDesc = true; break; }
     }
-    var fullwidth = hasDesc || askMulti; // 纵向满宽布局
+    var fullwidth = hasDesc || askMulti || editorOpen || !!customOpt; // 纵向满宽布局
     var multiQ = info.kind === 'ask' && askQuestionCount > 1; // 多问(显示 ‹ › 导航)
     // AskUserQuestion 多问时加 ‹ › 导航,且同步终端焦点(见 navAskQuestion)。
     var navPrev = '<button class="quick-reply-btn nav" onclick="navAskQuestion(-1)"'
@@ -3271,50 +3353,52 @@ function injectInteractivePrompts(messages) {
     var optsHTML = '';
     var currentAnswer = currentAskAnswer();
     if (fullwidth) optsHTML += '<div class="ask-option-group">';
-    for (var j = 0; j < info.buttons.length; j++) {
-      var b = info.buttons[j];
-      var cls = b.cls || '';
-      if (info.kind === 'ask' && b.multi) {
-        // 多选:优先用 askMultiSelectPicks（当前编辑态），无则回退到已记忆答案 askAnswers。
-        var picked = isAskPicked(b.optionIndex) || !!(currentAnswer && currentAnswer.kind === 'multi' && currentAnswer.picks && currentAnswer.picks[b.optionIndex]);
-        optsHTML += '<button class="quick-reply-btn with-desc ask-multi' + (picked ? ' selected' : '') + '"'
-          + ' data-opt-idx="' + b.optionIndex + '" onclick="toggleAskPick(' + b.optionIndex + ')">'
-          + '<span class="ask-multi-box">' + (picked ? '☑' : '☐') + '</span>'
-          + '<span class="ask-option-label">' + escHtml(b.label) + '</span>'
-          + (b.desc ? '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>' : '')
-          + '</button>';
-      } else if (info.kind === 'ask') {
-        // 单选:按真实已选答案高亮；不再默认高亮第一项。
-        var selected = isAskSingleSelected(b.optionIndex);
-        var scls = selected ? ' primary selected' : '';
-        if (b.desc) {
-          optsHTML += '<button class="quick-reply-btn with-desc' + scls + '" onclick="sendQuickReply(' + b.optionIndex + ', \'ask\')">'
+    if (editorOpen) {
+      optsHTML += renderAskCustomEditorHTML(askCustomEditor.draft || '');
+    } else {
+      for (var j = 0; j < info.buttons.length; j++) {
+        var b = info.buttons[j];
+        var cls = b.cls || '';
+        if (info.kind === 'ask' && b.multi) {
+          // 多选:优先用 askMultiSelectPicks（当前编辑态），无则回退到已记忆答案 askAnswers。
+          var picked = isAskPicked(b.optionIndex) || !!(currentAnswer && currentAnswer.kind === 'multi' && currentAnswer.picks && currentAnswer.picks[b.optionIndex]);
+          optsHTML += '<button class="quick-reply-btn with-desc ask-multi' + (picked ? ' selected' : '') + '"'
+            + ' data-opt-idx="' + b.optionIndex + '" onclick="toggleAskPick(' + b.optionIndex + ')">'
+            + '<span class="ask-multi-box">' + (picked ? '☑' : '☐') + '</span>'
             + '<span class="ask-option-label">' + escHtml(b.label) + '</span>'
-            + '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>'
+            + (b.desc ? '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>' : '')
             + '</button>';
+        } else if (info.kind === 'ask') {
+          // 单选:按真实已选答案高亮；不再默认高亮第一项。
+          var selected = isAskSingleSelected(b.optionIndex);
+          var scls = selected ? ' primary selected' : '';
+          if (b.desc) {
+            optsHTML += '<button class="quick-reply-btn with-desc' + scls + '" onclick="sendQuickReply(' + b.optionIndex + ', \'ask\')">'
+              + '<span class="ask-option-label">' + escHtml(b.label) + '</span>'
+              + '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>'
+              + '</button>';
+          } else {
+            optsHTML += '<button class="quick-reply-btn' + scls + '" onclick="sendQuickReply(' + b.optionIndex + ', \'ask\')">' + escHtml(b.label) + '</button>';
+          }
         } else {
-          optsHTML += '<button class="quick-reply-btn' + scls + '" onclick="sendQuickReply(' + b.optionIndex + ', \'ask\')">' + escHtml(b.label) + '</button>';
-        }
-      } else {
-        // plan / perm:维持发文本(ActPrompt),value='1'/'2'/'3'/'y'/'n'
-        if (b.desc) {
-          optsHTML += '<button class="quick-reply-btn with-desc ' + cls + '" onclick="sendQuickReply(\'' + escAttr(String(b.value)) + '\', \'' + info.kind + '\')">'
-            + '<span class="ask-option-label">' + escHtml(b.label) + '</span>'
-            + '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>'
-            + '</button>';
-        } else {
-          optsHTML += '<button class="quick-reply-btn ' + cls + '" onclick="sendQuickReply(\'' + escAttr(String(b.value)) + '\', \'' + info.kind + '\')">' + escHtml(b.label) + '</button>';
+          // plan / perm:维持发文本(ActPrompt),value='1'/'2'/'3'/'y'/'n'
+          if (b.desc) {
+            optsHTML += '<button class="quick-reply-btn with-desc ' + cls + '" onclick="sendQuickReply(\'' + escAttr(String(b.value)) + '\', \'' + info.kind + '\')">'
+              + '<span class="ask-option-label">' + escHtml(b.label) + '</span>'
+              + '<span class="ask-option-desc">' + escHtml(b.desc) + '</span>'
+              + '</button>';
+          } else {
+            optsHTML += '<button class="quick-reply-btn ' + cls + '" onclick="sendQuickReply(\'' + escAttr(String(b.value)) + '\', \'' + info.kind + '\')">' + escHtml(b.label) + '</button>';
+          }
         }
       }
-    }
-    // ask 追加「✍ 自定义输入」(终端 Type something 入口) + 多选「✓ 确认提交」
-    if (info.kind === 'ask') {
-      var customSelected = currentAnswer && currentAnswer.kind === 'custom';
-      var customLabel = customSelected ? ('✍ 已选自定义：' + (currentAnswer.text || '')) : '✍ 自定义输入';
-      optsHTML += '<button class="quick-reply-btn ask-custom' + (customSelected ? ' selected' : '') + '" onclick="startAskCustom()">' + escHtml(customLabel) + '</button>';
-    }
-    if (askMulti) {
-      optsHTML += '<button class="quick-reply-btn ask-submit" onclick="submitMultiSelect()">✓ 确认提交</button>';
+      // ask 追加「✍ 自定义输入」(终端 Type something 入口/已输入自定义项) + 多选「✓ 确认提交」
+      if (info.kind === 'ask') {
+        optsHTML += renderAskCustomOptionHTML(customOpt, askMulti, currentAnswer);
+      }
+      if (askMulti) {
+        optsHTML += '<button class="quick-reply-btn ask-submit" onclick="submitMultiSelect()">✓ 确认提交</button>';
+      }
     }
     if (fullwidth) optsHTML += '</div>';
 
@@ -3328,28 +3412,61 @@ function injectInteractivePrompts(messages) {
     }
     repliesEl.innerHTML = '<span class="chat-msg-label" style="margin-right:6px">' + escHtml(info.hint) + '</span>' + btnsHTML;
     lastReplySignature = sig;
+    if (editorOpen) {
+      setTimeout(function() {
+        var input = document.getElementById('ask-custom-inline-input');
+        if (input) { input.focus(); input.select(); }
+      }, 0);
+    }
   }
   repliesEl.classList.remove("hidden");
 }
 
 // ---- 多选勾选状态(就地翻转,不触发轮询重渲染) ----
 function askPicksKey() { return askToolUseId + '#' + askQuestionIndex; }
+function askPicksState() {
+  var k = askPicksKey();
+  var p = askMultiSelectPicks[k];
+  // 兼容旧形状 {optionIndex:true}，读到后顺手迁移为 {picks:{...}, customSelected:false}。
+  if (!p || !p.picks) {
+    var old = p || {};
+    p = { picks: {}, customSelected: false };
+    for (var key in old) if (old[key]) p.picks[key] = true;
+    askMultiSelectPicks[k] = p;
+  }
+  return p;
+}
 function isAskPicked(optionIndex) {
-  var p = askMultiSelectPicks[askPicksKey()];
-  return !!(p && p[optionIndex]);
+  var p = askPicksState();
+  return !!(p.picks && p.picks[optionIndex]);
+}
+function isAskCustomPicked(currentAnswer) {
+  var p = askPicksState();
+  return !!(p.customSelected || (currentAnswer && currentAnswer.kind === 'multi' && currentAnswer.customSelected));
 }
 // toggleAskPick 切换某选项的勾选态:更新 askMultiSelectPicks + 就地翻转按钮 DOM 的 class/复选框,
 // 不动 lastReplySignature(签名不含勾选态),避免每秒轮询冲掉勾选。
 window.toggleAskPick = function(optionIndex) {
-  var k = askPicksKey();
-  if (!askMultiSelectPicks[k]) askMultiSelectPicks[k] = {};
-  if (askMultiSelectPicks[k][optionIndex]) delete askMultiSelectPicks[k][optionIndex];
-  else askMultiSelectPicks[k][optionIndex] = true;
+  var p = askPicksState();
+  if (p.picks[optionIndex]) delete p.picks[optionIndex];
+  else p.picks[optionIndex] = true;
   var btn = document.querySelector('#chat-quick-replies button[data-opt-idx="' + optionIndex + '"]');
   if (btn) {
     var on = btn.classList.toggle('selected');
     var box = btn.querySelector('.ask-multi-box');
     if (box) box.textContent = on ? '☑' : '☐';
+  }
+};
+
+window.toggleAskCustomPick = function() {
+  if (!currentAskCustomOption()) { startAskCustom('create'); return; }
+  var p = askPicksState();
+  p.customSelected = !p.customSelected;
+  var btn = document.querySelector('#chat-quick-replies .ask-custom-value');
+  if (btn) {
+    btn.classList.toggle('selected', p.customSelected);
+    var box = btn.querySelector('.ask-multi-box');
+    if (box) box.textContent = p.customSelected ? '☑' : '☐';
   }
 };
 
@@ -3383,8 +3500,14 @@ function currentAskAnswer() { return askAnswers[askAnswerKey()] || null; }
 function setAskSingleAnswer(optionIndex, label) {
   askAnswers[askAnswerKey()] = { kind: 'single', optionIndex: optionIndex, label: label || '' };
 }
-function setAskMultiAnswer(picks, labels) {
-  askAnswers[askAnswerKey()] = { kind: 'multi', picks: picks || {}, labels: labels || [] };
+function setAskMultiAnswer(picks, labels, customSelected, customText) {
+  askAnswers[askAnswerKey()] = {
+    kind: 'multi',
+    picks: picks || {},
+    labels: labels || [],
+    customSelected: !!customSelected,
+    customText: customText || ''
+  };
 }
 function setAskCustomAnswer(text) {
   askAnswers[askAnswerKey()] = { kind: 'custom', text: text || '' };
@@ -3589,8 +3712,8 @@ window.navAskQuestion = function(delta) {
   if (next < 0) next = 0;
   if (next > askQuestionCount) next = askQuestionCount;
   if (next === askQuestionIndex) return;
-  // 自定义输入态下切题:先取消,避免 banner 指向错误题号
-  if (askCustomPending) cancelAskCustom();
+  // 自定义输入态下切题:先取消编辑器,避免输入框指向错误题号
+  if (askCustomEditor) cancelAskCustom();
   askQuestionIndex = next;
   lastReplySignature = ''; // 强制重新注入(换题后按钮变了)
   if (chatPanelPid && next < askQuestionCount) {
@@ -3613,15 +3736,22 @@ window.sendQuickReply = async function(value, kind) {
       // 单选:value = optionIndex。当前题只发数字键作答;若这是最后一题,等确认页渲染后直接发回车确认 Submit answers。
       var cur = currentAskQuestion();
       var isLastQuestion = askToolUseId && askQuestionIndex === askQuestionCount - 1;
-      var seq = buildAskSequence({
-        questionIndex: askQuestionIndex,
-        totalCount: askQuestionCount,
-        totalOptionsCount: (cur ? cur.options.length : 0) + 1,
-        multiSelect: false,
-        selectedIndices: [value],
-        customText: ''
-      });
-      await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(seq));
+      if (currentAskCustomOption()) {
+        // 已在 Type something 输入过内容时,数字键会被输入框吞掉；改为先同步焦点再回车选择普通项。
+        await focusAskTerminalIndex(value);
+        await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'enter' }]));
+        askTerminalFocus[askFocusKey()] = value;
+      } else {
+        var seq = buildAskSequence({
+          questionIndex: askQuestionIndex,
+          totalCount: askQuestionCount,
+          totalOptionsCount: (cur ? cur.options.length : 0) + 1,
+          multiSelect: false,
+          selectedIndices: [value],
+          customText: ''
+        });
+        await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(seq));
+      }
       if (isLastQuestion) {
         await new Promise(function(resolve) { setTimeout(resolve, 200); });
         await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'enter' }]));
@@ -3635,6 +3765,7 @@ window.sendQuickReply = async function(value, kind) {
     // 推进本地多问进度(AskUserQuestion 答完一题到下一题)
     if (askToolUseId && askQuestionIndex < askQuestionCount) {
       askQuestionIndex++;
+      askTerminalFocus[askFocusKey()] = 0;
     }
     showOptimisticReply(optimisticText);
     finishAskInteraction();
@@ -3648,27 +3779,35 @@ window.sendQuickReply = async function(value, kind) {
 // submitMultiSelect 提交当前多选题的所有勾选:构造多选按键序列注入终端。
 window.submitMultiSelect = async function() {
   if (!chatPanelPid) return;
-  var picks = askMultiSelectPicks[askPicksKey()] || {};
+  var state = askPicksState();
+  var picks = state.picks || {};
   var indices = Object.keys(picks).map(Number).sort(function(a, b) { return a - b; });
-  if (indices.length === 0) { showChatHint('请至少勾选一项'); return; }
+  var custom = currentAskCustomOption();
+  var customSelected = !!(custom && state.customSelected);
+  if (indices.length === 0 && !customSelected) { showChatHint('请至少勾选一项'); return; }
   var cur = currentAskQuestion();
   try {
     // 三阶段发送(关键):
-    //  1) 先发数字键 toggle 勾选
+    //  1) 先发数字键 toggle 勾选普通项/自定义项
     //  2) 等待 claude UI 消化勾选
-    //  3) 像手动点调试键栏一样,每次只发一个 ↓,步进到 Submit 项后再单独回车
+    //  3) 根据本应用维护的终端焦点，步进到 Submit 项后回车
     // 原因:实测单发 ↓ 有效,但把多个 ↓ 批量/高速发送时 claude 多选 UI 不跟随。
     var toggleSeq = indices.map(function(i) { return { text: String(i + 1) }; });
-    var totalOpts = (cur ? cur.options.length : 0) + 1; // +1 为 Type something
+    if (customSelected) toggleSeq.push({ text: String(askCustomIndex(cur) + 1) });
     var isLastQuestion = askToolUseId && askQuestionIndex === askQuestionCount - 1;
 
-    await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(toggleSeq));
-    await new Promise(function(resolve) { setTimeout(resolve, 200); });
-
-    for (var t = 0; t < totalOpts; t++) {
-      await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'down' }]));
-      await new Promise(function(resolve) { setTimeout(resolve, 100); });
+    if (toggleSeq.length > 0) {
+      // Type something 文本刚写入后，终端仍可能处于输入态；如果直接发数字键，
+      // 数字会被追加到自定义文本里（如 test235）。先用方向键离开输入态，再用数字快捷键勾选。
+      if (custom) {
+        await focusAskTerminalIndex(0);
+        await new Promise(function(resolve) { setTimeout(resolve, 120); });
+      }
+      await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(toggleSeq));
+      await new Promise(function(resolve) { setTimeout(resolve, 200); });
     }
+
+    await focusAskTerminalIndex(askSubmitIndex(cur));
     await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'enter' }]));
 
     // 最后一题会进入 AskUserQuestion 的最终确认页:
@@ -3682,9 +3821,13 @@ window.submitMultiSelect = async function() {
     }
 
     var labels = indices.map(function(i) { return getOptionLabel(cur, i); });
-    setAskMultiAnswer(Object.assign({}, picks), labels);
+    if (customSelected) labels.push(custom.text);
+    setAskMultiAnswer(Object.assign({}, picks), labels, customSelected, customSelected ? custom.text : '');
     delete askMultiSelectPicks[askPicksKey()]; // 清该题勾选
-    if (askToolUseId && askQuestionIndex < askQuestionCount) askQuestionIndex++;
+    if (askToolUseId && askQuestionIndex < askQuestionCount) {
+      askQuestionIndex++;
+      askTerminalFocus[askFocusKey()] = 0;
+    }
     showOptimisticReply(labels.join('、'));
     finishAskInteraction();
     refreshChatMessages(chatPanelPid);
@@ -3695,74 +3838,165 @@ window.submitMultiSelect = async function() {
 };
 
 // ---- Type something 自定义输入流程 ----
-// 点击「✍ 自定义输入」后,选项区换成提示 banner,聚焦下方输入框;
-// 用户输入文本发送时(sendChatMessage 拦截)走 submitAskCustom 构造 Type something 序列。
-window.startAskCustom = function() {
+// 点击「✍ 自定义输入」只是在 Claude Code 的 Type something 中创建/编辑一个自定义选项；
+// 之后再次点击已创建的自定义项，才按普通选项选择/勾选。
+function askOptionCount(question) {
+  return (question && question.options) ? question.options.length : 0;
+}
+function currentAskCustomOption() {
+  return askCustomOptions[askAnswerKey()] || null;
+}
+function askCustomIndex(question) {
+  return askOptionCount(question);
+}
+function askTypeSomethingIndex(question) {
+  return askOptionCount(question) + (currentAskCustomOption() ? 1 : 0);
+}
+function askSubmitIndex(question) {
+  return askTypeSomethingIndex(question) + 1;
+}
+function askFocusKey() { return askAnswerKey(); }
+function askFocusValue() {
+  var k = askFocusKey();
+  return askTerminalFocus[k] == null ? 0 : askTerminalFocus[k];
+}
+async function focusAskTerminalIndex(targetIndex) {
   if (!chatPanelPid) return;
-  askCustomPending = true;
-  askCustomQuestionIndex = askQuestionIndex;
-  var repliesEl = document.getElementById("chat-quick-replies");
-  repliesEl.innerHTML = '<div class="ask-custom-banner">'
-    + '<span>✍ 正在为第 ' + (askQuestionIndex + 1) + ' 题输入自定义答案(下方输入框输入,发送即提交)</span>'
-    + '<button class="ask-custom-cancel" onclick="cancelAskCustom()">✗ 取消</button>'
+  targetIndex = Math.max(0, targetIndex || 0);
+  var cur = askFocusValue();
+  if (cur === targetIndex) return;
+  var key = targetIndex > cur ? 'down' : 'up';
+  var steps = Math.abs(targetIndex - cur);
+  // 多选/Ask TUI 对连续方向键很敏感，逐个发送并短暂等待比批量注入稳定。
+  for (var i = 0; i < steps; i++) {
+    await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: key }]));
+    askTerminalFocus[askFocusKey()] = key === 'down' ? askFocusValue() + 1 : Math.max(0, askFocusValue() - 1);
+    await new Promise(function(resolve) { setTimeout(resolve, 80); });
+  }
+}
+function renderAskCustomEditorHTML(draft) {
+  return '<div class="ask-custom-inline">'
+    + '<span class="ask-custom-inline-label">✍ 自定义内容</span>'
+    + '<input id="ask-custom-inline-input" class="ask-custom-inline-input" value="' + escAttr(draft || '') + '" placeholder="输入后点确定，只发送文本，不选择" onkeydown="onAskCustomInputKey(event)">'
+    + '<button class="quick-reply-btn ask-custom-ok" onclick="confirmAskCustom()">确定</button>'
+    + '<button class="quick-reply-btn ask-custom-cancel" onclick="cancelAskCustom()">取消</button>'
     + '</div>';
-  repliesEl.classList.remove("hidden");
-  document.getElementById("chat-waiting").classList.add("hidden");
-  var input = document.getElementById("chat-input");
-  input.value = "";
-  input.placeholder = "输入自定义答案,发送即提交...";
-  input.focus();
+}
+function renderAskCustomOptionHTML(customOpt, askMulti, currentAnswer) {
+  if (!customOpt) {
+    return '<button class="quick-reply-btn ask-custom" onclick="startAskCustom(\'create\')">✍ 自定义输入</button>';
+  }
+  var text = customOpt.text || '';
+  if (askMulti) {
+    var picked = isAskCustomPicked(currentAnswer);
+    return '<div class="ask-custom-row">'
+      + '<button class="quick-reply-btn with-desc ask-multi ask-custom-value' + (picked ? ' selected' : '') + '" onclick="toggleAskCustomPick()">'
+      + '<span class="ask-multi-box">' + (picked ? '☑' : '☐') + '</span>'
+      + '<span class="ask-option-label">✍ ' + escHtml(text) + '</span>'
+      + '<span class="ask-option-desc">自定义答案，点击勾选/取消</span>'
+      + '</button>'
+      + '<button class="quick-reply-btn ask-custom-edit" onclick="startAskCustom(\'edit\')">编辑</button>'
+      + '</div>';
+  }
+  var selected = currentAnswer && currentAnswer.kind === 'custom' && currentAnswer.text === text;
+  return '<div class="ask-custom-row">'
+    + '<button class="quick-reply-btn with-desc ask-custom ask-custom-value' + (selected ? ' selected primary' : '') + '" onclick="sendAskCustomOption()">'
+    + '<span class="ask-option-label">✍ ' + escHtml(text) + '</span>'
+    + '<span class="ask-option-desc">点击后才选择这个自定义答案</span>'
+    + '</button>'
+    + '<button class="quick-reply-btn ask-custom-edit" onclick="startAskCustom(\'edit\')">编辑</button>'
+    + '</div>';
+}
+
+window.startAskCustom = async function(mode) {
+  if (!chatPanelPid) return;
+  var cur = currentAskQuestion();
+  var k = askAnswerKey();
+  var existing = currentAskCustomOption();
+  mode = mode === 'edit' && existing ? 'edit' : 'create';
+  askCustomEditor = { key: k, questionIndex: askQuestionIndex, mode: mode, draft: existing ? existing.text : '' };
+  lastReplySignature = '';
+  injectInteractivePrompts(lastChatMessages);
+  try {
+    // 用户确认：Claude Code 的 Type something 聚焦后就是输入状态，不额外回车。
+    await focusAskTerminalIndex(askTypeSomethingIndex(cur));
+  } catch (e) {
+    showChatHint('移动到 Type something 失败: ' + (e && e.message ? e.message : e));
+  }
 };
 
 window.cancelAskCustom = function() {
-  askCustomPending = false;
-  var input = document.getElementById("chat-input");
-  input.value = "";
-  updateSendHints(); // 恢复 placeholder
-  lastReplySignature = ''; // 触发重新渲染选项区
+  askCustomEditor = null;
+  lastReplySignature = '';
   injectInteractivePrompts(lastChatMessages);
 };
 
-// submitAskCustom 用 Type something 序列提交自定义文本。
-// 文本换行扁平化为空格(终端输入框换行不可预测,与 ActPrompt 一致)。
-async function submitAskCustom(text) {
-  if (!chatPanelPid) return;
+window.onAskCustomInputKey = function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    confirmAskCustom();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    cancelAskCustom();
+  }
+};
+
+window.confirmAskCustom = async function() {
+  if (!chatPanelPid || !askCustomEditor) return;
+  var input = document.getElementById('ask-custom-inline-input');
+  var text = input ? input.value.trim() : '';
+  if (!text) { showChatHint('自定义内容不能为空'); return; }
   var flat = text.replace(/\r\n/g, ' ').replace(/\n/g, ' ');
+  var editor = askCustomEditor;
   var cur = currentAskQuestion();
   try {
-    var seq = buildAskSequence({
-      questionIndex: askCustomQuestionIndex,
-      totalCount: askQuestionCount,
-      totalOptionsCount: (cur ? cur.options.length : 0) + 1,
-      multiSelect: false,
-      selectedIndices: [],
-      customText: flat
-    });
+    await focusAskTerminalIndex(askTypeSomethingIndex(cur));
+    var seq = [];
+    if (editor.mode === 'edit') seq.push({ key: 'clearInput' });
+    seq.push({ text: flat });
+    // 自定义内容写入 Type something 时，单选不能回车；回车会直接触发选择/提交。
+    // 多选会在输入后默认勾选新自定义项，补一个回车用于取消默认勾选，保持“确定只写入文本”。
+    if (cur && cur.multiSelect) seq.push({ key: 'enter' });
+    // 只把文本送进终端输入态，然后在应用里显示为可点击的自定义项。
     await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(seq));
-    askCustomPending = false;
-    var input = document.getElementById("chat-input");
-    input.value = "";
-    input.style.height = "";
-    delete chatDrafts[chatDraftKey()];
-    updateSendHints(); // 恢复 placeholder
-    setAskCustomAnswer(flat);
-    // 推进多问进度(对齐进入自定义模式时的题号)
-    if (askToolUseId && askCustomQuestionIndex < askQuestionCount) {
-      askQuestionIndex = askCustomQuestionIndex + 1;
+    askCustomOptions[editor.key] = { text: flat };
+    // 关键：写入后终端高亮停在已输入的自定义项上。多选场景下上面额外回车只用于
+    // 取消默认勾选，不改变高亮位置；后续仍从自定义项位置计算方向键。
+    askTerminalFocus[editor.key] = askCustomIndex(cur);
+    askCustomEditor = null;
+    lastReplySignature = '';
+    showChatHint('已发送自定义文本，请点击该自定义项完成选择');
+    injectInteractivePrompts(lastChatMessages);
+  } catch (e) {
+    showChatHint('自定义内容写入失败: ' + (e && e.message ? e.message : e));
+  }
+};
+
+window.sendAskCustomOption = async function() {
+  if (!chatPanelPid) return;
+  var cur = currentAskQuestion();
+  var custom = currentAskCustomOption();
+  if (!custom) { startAskCustom('create'); return; }
+  try {
+    var isLastQuestion = askToolUseId && askQuestionIndex === askQuestionCount - 1;
+    var idx = askCustomIndex(cur);
+    await focusAskTerminalIndex(idx);
+    await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'enter' }]));
+    askTerminalFocus[askFocusKey()] = idx;
+    if (isLastQuestion) {
+      await new Promise(function(resolve) { setTimeout(resolve, 200); });
+      await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify([{ key: 'enter' }]));
     }
-    showOptimisticReply('✍ ' + flat);
+    setAskCustomAnswer(custom.text);
+    if (askToolUseId && askQuestionIndex < askQuestionCount) askQuestionIndex++;
+    showOptimisticReply(custom.text);
     finishAskInteraction();
     refreshChatMessages(chatPanelPid);
     setTimeout(function() { if (chatPanelPid) refreshChatMessages(chatPanelPid); }, 2000);
   } catch (e) {
-    alert("发送失败: " + (e && e.message ? e.message : e));
-    askCustomPending = false;
-    updateSendHints();
-    lastReplySignature = '';
-    injectInteractivePrompts(lastChatMessages);
+    alert('发送失败: ' + (e && e.message ? e.message : e));
   }
-}
-window.submitAskCustom = submitAskCustom;
+};
 
 // ---- 交互作答的公共收尾 ----
 // showOptimisticReply 在消息区追加一条「快速回复」气泡并滚到底。
