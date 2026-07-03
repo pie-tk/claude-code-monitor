@@ -119,8 +119,8 @@ func (s *MonitorService) ActPrompt(pid int, text string) error {
 }
 
 // ActAskAnswer 向目标实例发送按键 token 序列，用于驱动 AskUserQuestion 的终端选择 UI。
-// actions 是 token 的 JSON 字符串，每个 token 为 {"key":"left|right|up|down|space|tab|enter|backspace|delete|esc|ctrl+a|clearInput"}
-// 或 {"text":"abc"}。clearInput 用于清空 Type something 当前输入内容。前端 buildAskSequence/自定义输入流程构造，注入层翻译为方向键/控制键/文本/回车事件。
+// actions 是 token 的 JSON 字符串，每个 token 为 {"key":"left|right|up|down|space|tab|enter|backspace|delete|esc|ctrl+a|ctrl+u|ctrl+k|clearInput"}
+// 或 {"text":"abc"}。ctrl+u/ctrl+k 用于清空 Type something 当前行残留内容。前端 buildAskSequence/自定义输入流程构造，注入层翻译为方向键/控制键/文本/回车事件。
 func (s *MonitorService) ActAskAnswer(pid int, actions string) error {
 	if strings.TrimSpace(actions) == "" {
 		return fmt.Errorf("actions 不能为空")
@@ -310,7 +310,7 @@ type SettingsResult struct {
 }
 
 // Version 应用版本号。
-const Version = "1.4.9"
+const Version = "1.5.0"
 
 // GetSettings 返回当前设置。
 func (s *MonitorService) GetSettings() *SettingsResult {

@@ -9,8 +9,8 @@ type ConsoleInput interface {
 	// SendPrompt 向目标实例发送文本并回车。
 	SendPrompt(pid int, text string) error
 	// SendAskAnswer 向目标实例发送按键 token 序列（AskUserQuestion 作答）。
-	// actions 是 token 的 JSON 字符串，每个 token 为 {"key":"left|right|up|down|space|tab|enter|backspace|delete|esc|ctrl+a|clearInput"}
-	// 或 {"text":"abc"}（注入文本）。clearInput 用于清空 Type something 当前输入内容。供前端驱动终端的方向键/空格/回车选择 UI。
+	// actions 是 token 的 JSON 字符串，每个 token 为 {"key":"left|right|up|down|space|tab|enter|backspace|delete|esc|ctrl+a|ctrl+u|ctrl+k|clearInput"}
+	// 或 {"text":"abc"}（注入文本）。ctrl+u/ctrl+k 用于清空 Type something 当前行残留内容。供前端驱动终端的方向键/空格/回车选择 UI。
 	SendAskAnswer(pid int, actions string) error
 	// ShowWindow 将目标实例所在的终端窗口置前。
 	ShowWindow(pid int) error

@@ -3849,8 +3849,11 @@ function currentAskCustomOption() {
 function askCustomIndex(question) {
   return askOptionCount(question);
 }
+// 输入行（Type something / 已输入的自定义项）始终位于选项之后，索引 = 选项数。
+// 关键：输入自定义文本后，自定义项就占据原 Type something 那一行（仍在索引 N），
+// 下方不会新增第二个 Type something；因此不要因“已存在自定义项”而 +1，否则编辑时会多走一行。
 function askTypeSomethingIndex(question) {
-  return askOptionCount(question) + (currentAskCustomOption() ? 1 : 0);
+  return askOptionCount(question);
 }
 function askSubmitIndex(question) {
   return askTypeSomethingIndex(question) + 1;
@@ -3925,10 +3928,18 @@ window.startAskCustom = async function(mode) {
   }
 };
 
-window.cancelAskCustom = function() {
+window.cancelAskCustom = async function() {
+  // 取消：不发任何自定义文本，并把终端高亮从 Type something 移回第一个选项，
+  // 避免停留在输入态导致后续点击选项位置偏移。
+  var editor = askCustomEditor;
   askCustomEditor = null;
   lastReplySignature = '';
   injectInteractivePrompts(lastChatMessages);
+  if (chatPanelPid && editor) {
+    try {
+      await focusAskTerminalIndex(0);
+    } catch (e) { /* 忽略：取消时的终端同步失败不阻断 UI */ }
+  }
 };
 
 window.onAskCustomInputKey = function(e) {
@@ -3952,7 +3963,10 @@ window.confirmAskCustom = async function() {
   try {
     await focusAskTerminalIndex(askTypeSomethingIndex(cur));
     var seq = [];
-    if (editor.mode === 'edit') seq.push({ key: 'clearInput' });
+    // 发送内容前先用 Ctrl+U + Ctrl+K 清空当前输入行（删除光标到行首 + 到行尾），
+    // 避免终端侧残留之前输入过的文本（编辑场景或终端记忆的上次内容）。新建/编辑统一处理。
+    seq.push({ key: 'ctrl+u' });
+    seq.push({ key: 'ctrl+k' });
     seq.push({ text: flat });
     // 自定义内容写入 Type something 时，单选不能回车；回车会直接触发选择/提交。
     // 多选会在输入后默认勾选新自定义项，补一个回车用于取消默认勾选，保持“确定只写入文本”。
@@ -3960,9 +3974,10 @@ window.confirmAskCustom = async function() {
     // 只把文本送进终端输入态，然后在应用里显示为可点击的自定义项。
     await Call.ByID(ID_ACT_ASK_ANSWER, chatPanelPid, JSON.stringify(seq));
     askCustomOptions[editor.key] = { text: flat };
-    // 关键：写入后终端高亮停在已输入的自定义项上。多选场景下上面额外回车只用于
-    // 取消默认勾选，不改变高亮位置；后续仍从自定义项位置计算方向键。
-    askTerminalFocus[editor.key] = askCustomIndex(cur);
+    // 统一把终端高亮移回第一个选项：写入后终端停在自定义项的输入态，
+    // 若停留在此，多问的 ‹ ›（左右键）会变成自定义文本内的光标移动，无法切题；
+    // 移回第一项后，后续选择/切题都从第一项位置计算。
+    await focusAskTerminalIndex(0);
     askCustomEditor = null;
     lastReplySignature = '';
     showChatHint('已发送自定义文本，请点击该自定义项完成选择');

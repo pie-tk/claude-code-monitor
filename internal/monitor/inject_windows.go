@@ -71,6 +71,8 @@ const (
 	vkDown    = 0x28
 	vkDelete  = 0x2E
 	vkA       = 0x41
+	vkK       = 0x4B
+	vkU       = 0x55
 	swRestore = 9 // SW_RESTORE
 	wmClose   = 0x0010
 )
@@ -113,6 +115,10 @@ func vkToScanCode(vk uint16) uint16 {
 		return 0x39
 	case vkA:
 		return 0x1E
+	case vkK:
+		return 0x25
+	case vkU:
+		return 0x16
 	case vkLeft:
 		return 0x4B
 	case vkUp:
@@ -337,6 +343,21 @@ func ctrlARecords() []inputRecord {
 	}
 }
 
+// ctrlURecords / ctrlKRecords 产生 Ctrl+U / Ctrl+K（readline 的 unix-line-discard / kill-line），
+// 分别删除「光标到行首」「光标到行尾」的内容，组合使用可清空整行输入。
+func ctrlURecords() []inputRecord {
+	return []inputRecord{
+		makeKeyRecordWithState(true, vkU, 0x15, leftCtrlPressed),
+		makeKeyRecordWithState(false, vkU, 0x15, leftCtrlPressed),
+	}
+}
+func ctrlKRecords() []inputRecord {
+	return []inputRecord{
+		makeKeyRecordWithState(true, vkK, 0x0B, leftCtrlPressed),
+		makeKeyRecordWithState(false, vkK, 0x0B, leftCtrlPressed),
+	}
+}
+
 func clearInputRecords() []inputRecord {
 	recs := ctrlARecords()
 	recs = append(recs, arrowRecord(vkBack)...)
@@ -364,6 +385,10 @@ func keyTokenRecords(key string) ([]inputRecord, error) {
 		return arrowRecord(vkEscape), nil
 	case "ctrl+a":
 		return ctrlARecords(), nil
+	case "ctrl+u":
+		return ctrlURecords(), nil
+	case "ctrl+k":
+		return ctrlKRecords(), nil
 	case "clearInput":
 		return clearInputRecords(), nil
 	case "space":
