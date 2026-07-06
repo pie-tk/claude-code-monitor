@@ -87,14 +87,14 @@ func runWailsApp() {
 	})
 	menu.AddSeparator()
 	menu.Add("退出").OnClick(func(ctx *application.Context) {
-		app.Quit()
+		quitApp(svc, app)
 	})
 	tray.SetMenu(menu)
 
 	// ---- 关闭窗口：根据设置决定隐藏到托盘还是直接退出 ----
 	win.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
 		if monitor.IsCloseQuit() {
-			app.Quit()
+			quitApp(svc, app)
 			return
 		}
 		win.Hide()
@@ -138,4 +138,10 @@ func runWailsApp() {
 	if err != nil {
 		fmt.Println("应用运行出错:", err)
 	}
+}
+
+// quitApp 退出前清理所有内置终端会话（终止 claude/pwsh 子进程、释放 ConPTY 句柄），再退出应用。
+func quitApp(svc *service.MonitorService, app *application.App) {
+	svc.CloseAllTerminals()
+	app.Quit()
 }

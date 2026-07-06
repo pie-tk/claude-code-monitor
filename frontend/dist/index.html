@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/style.css">
   <title>CC Console</title>
-  <script type="module" crossorigin src="/assets/index-B3mD9iUO.js"></script>
+  <script type="module" crossorigin src="/assets/index-C2XDfaXO.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BrP-ENHg.css">
 </head>
 <body>
   <div id="app">
@@ -28,6 +29,7 @@
         </button>
         <span class="flex-spacer"></span>
         <button id="new-instance-btn" class="new-instance-btn" title="新建 Claude Code 会话" onclick="openNewInstancePanel()">＋ 新建会话</button>
+        <button id="terminal-btn" class="terminal-btn" title="打开内置终端" onclick="openTerminalPanel()">🖥 终端</button>
         <button id="settings-btn" class="settings-btn" title="设置" aria-label="设置" onclick="showSettings()">
           <svg class="settings-btn-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3"/>
@@ -218,6 +220,21 @@
     </div>
   </div>
 
+  <!-- 内置终端面板（ConPTY + xterm.js） -->
+  <div id="terminal-overlay" class="modal-overlay hidden" onclick="if(event.target===this) closeTerminalPanel()">
+    <div class="terminal-dialog" id="terminal-dialog">
+      <div class="terminal-header">
+        <div class="terminal-tabs" id="terminal-tabs"></div>
+        <button class="terminal-new-btn" id="terminal-new-btn" title="新建终端（PowerShell，失败回退 CMD）" onclick="openNewTerminal()">＋</button>
+        <span class="flex-spacer"></span>
+        <button class="terminal-close-btn" onclick="closeTerminalPanel()" title="关闭">✕</button>
+      </div>
+      <div class="terminal-body" id="terminal-body">
+        <div class="terminal-empty" id="terminal-empty">没有打开的终端，点 ＋ 新建一个</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Claude settings.json 规则说明 -->
   <div id="claude-settings-rules-overlay" class="modal-overlay hidden" onclick="if(event.target===this) hideClaudeSettingsRules()">
     <div class="modal-dialog rules-dialog">
@@ -261,12 +278,13 @@
             </div>
             <div class="settings-item">
               <div class="settings-item-text">
-                <span class="settings-label">新建实例终端窗口</span>
-                <span class="settings-desc">启动新实例时终端窗口的显示方式。最小化时窗口收入任务栏，可点击查看运行状态</span>
+                <span class="settings-label">新建实例终端</span>
+                <span class="settings-desc">选择新实例的运行方式。内置终端在应用内打开，不弹出额外窗口；外部窗口调用系统 PowerShell 或 Windows Terminal</span>
               </div>
               <select id="select-launch-mode" class="settings-select" onchange="saveSetting('launchMode', this.value)">
-                <option value="show">显示</option>
-                <option value="hide">最小化到任务栏</option>
+                <option value="embedded">应用内置终端</option>
+                <option value="show">外部窗口 · 显示</option>
+                <option value="hide">外部窗口 · 最小化</option>
               </select>
             </div>
             <div class="settings-item">

@@ -3,6 +3,8 @@ package service
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,11 +19,12 @@ type MonitorService struct {
 	app         *application.App
 	window      *application.WebviewWindow
 	lastRelease *monitor.ReleaseInfo // 缓存最近一次 CheckUpdate 的结果，供下载时取 minisign 签名
+	pty         *monitor.PTYRegistry // 内置终端会话注册表（ConPTY）
 }
 
 // NewMonitorService 创建服务实例。
 func NewMonitorService() *MonitorService {
-	return &MonitorService{}
+	return &MonitorService{pty: monitor.NewPTYRegistry()}
 }
 
 // SetApp 在 ServiceStartup 中设置 app 引用。
@@ -237,6 +240,25 @@ func (s *MonitorService) LaunchInstance(workdir string) (string, error) {
 	if mode == "" || mode == "minimize" {
 		mode = "hide"
 	}
+
+	// 内置终端：在应用内 ConPTY 跑 claude，不开外部窗口。
+	// ConPTY 不可用（老系统）→ 静默回退外部窗口（graceful）；
+	// ConPTY 可用但启动失败（如 claude 未安装）→ 报错给前端，不静默开 PowerShell（避免「设了内置却弹外部」的困惑）。
+	if mode == "embedded" {
+		if !monitor.ConPTYSupported() {
+			// 老系统无 ConPTY → 回退最小化外部窗口
+			mode = "hide"
+		} else {
+			sid, err := s.StartTerminal("claude", workdir)
+			if err != nil {
+				return "", err // 明确报错，让前端提示用户
+			}
+			if _, e := monitor.AddRecentDir(workdir); e != nil {
+				fmt.Println("记录最近目录失败:", e)
+			}
+			return fmt.Sprintf(`{"embedded":true,"sessionId":%q}`, sid), nil
+		}
+	}
 	used, err := monitor.LaunchClaudeInDir(workdir, mode)
 	if err != nil {
 		return "", err
@@ -246,6 +268,174 @@ func (s *MonitorService) LaunchInstance(workdir string) (string, error) {
 		fmt.Println("记录最近目录失败:", e)
 	}
 	return used, nil
+}
+
+// ---- 内置终端（ConPTY）----
+//
+// 内置终端在应用内跑伪终端：claude/pwsh/cmd 作为 ConPTY 子进程，前端用 xterm.js 渲染。
+// Go→前端输出走 Wails 事件 term:output（高频），前端→Go 输入走以下绑定方法（请求-响应）。
+// claude 子进程仍照常写 ~/.claude/sessions/*.json 与 JSONL，现有监控/检测逻辑零改动。
+
+// StartTerminal 启动一个内置终端会话。
+//   - kind: "claude" | "pwsh" | "cmd" | "shell"
+//   - workdir: 工作目录（必须存在）
+//
+// 返回 session id（形如 term-N）。前端拿到后新建 xterm tab 并订阅 term:output 事件。
+func (s *MonitorService) StartTerminal(kind string, workdir string) (string, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = "shell"
+	}
+	if workdir = strings.TrimSpace(workdir); workdir != "" {
+		if info, err := os.Stat(workdir); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("工作目录不存在或不是目录: %s", workdir)
+		}
+	}
+
+	cmdline, err := buildTerminalCmdline(kind, workdir)
+	if err != nil {
+		return "", err
+	}
+
+	var sid string
+	sid, err = s.pty.StartPTYSession(kind, workdir, cmdline, 80, 24,
+		// onData：子进程输出片段 → 推给前端对应 tab
+		func(data string) {
+			if s.window != nil {
+				s.window.EmitEvent("term:output", map[string]any{"id": sid, "data": data})
+			}
+		},
+		// onExit：子进程退出 → 推退出码 + 从注册表移除
+		func(code int) {
+			if s.window != nil {
+				s.window.EmitEvent("term:exit", map[string]any{"id": sid, "exitCode": code})
+			}
+			s.pty.Remove(sid)
+		},
+	)
+	return sid, err
+}
+
+// buildTerminalCmdline 按 kind 拼接可执行文件命令行（含绝对路径，CreateProcessW 需要）。
+func buildTerminalCmdline(kind, workdir string) (string, error) {
+	switch kind {
+	case "claude":
+		return buildClaudeCmdline()
+	case "pwsh":
+		return fmt.Sprintf(`"%s" -NoLogo`, monitor.ResolveShellExe()), nil
+	case "cmd":
+		// cmd 默认 GBK 输出，启动时 chcp 65001 强制 UTF-8，避免中文乱码。
+		return `cmd.exe /K chcp 65001 >nul`, nil
+	case "shell", "":
+		return fmt.Sprintf(`"%s" -NoLogo`, monitor.ResolveShellExe()), nil
+	default:
+		return "", fmt.Errorf("未知终端类型: %s", kind)
+	}
+}
+
+// buildClaudeCmdline 解析 claude 并构造命令行。
+//
+// 关键：Windows 上 claude 必须经 claude.cmd 包装器启动才会正常写 session/JSONL（供监控识别）。
+// 直接 spawn claude.exe（绕过包装器）能跑、能响应，但【不落 session 文件】，导致实例无法被检测。
+// 所以优先找 claude.cmd，用 cmd.exe /c 包一层运行（CreateProcessW 不能直接跑 .cmd）；
+// 实在找不到 .cmd 才回退 raw claude.exe（次优，可能不被监控识别）。
+//
+// 解析顺序：PATH → %APPDATA%\npm（npm 全局，GUI 进程 PATH 可能不含此目录）。
+func buildClaudeCmdline() (string, error) {
+	args := monitor.BuildClaudeArgsForPTY()
+	argSuffix := ""
+	if args != "" {
+		argSuffix = " " + args
+	}
+
+	// 1. 收集 claude.cmd 候选（包装器，优先）。
+	var cmdCandidates []string
+	addCmd := func(p string) {
+		if p != "" && extIs(p, ".cmd", ".bat") {
+			cmdCandidates = append(cmdCandidates, p)
+		}
+	}
+	if p, err := exec.LookPath("claude.cmd"); err == nil {
+		addCmd(p)
+	}
+	if p, err := exec.LookPath("claude"); err == nil {
+		addCmd(p) // LookPath 命中 claude.cmd 时 p 带 .cmd 扩展名
+	}
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		cmdCandidates = append(cmdCandidates, filepath.Join(appdata, "npm", "claude.cmd"))
+	}
+	for _, p := range cmdCandidates {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			// 经 cmd.exe /c 跑包装器，与外部启动（pwsh→claude→claude.cmd→claude.exe）等价。
+			return fmt.Sprintf(`cmd.exe /c "%s"%s`, p, argSuffix), nil
+		}
+	}
+
+	// 2. 回退：raw claude.exe（次优，可能不被监控识别）。
+	var exeCandidates []string
+	if p, err := exec.LookPath("claude.exe"); err == nil {
+		exeCandidates = append(exeCandidates, p)
+	}
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		exeCandidates = append(exeCandidates, filepath.Join(appdata, "npm", "claude.exe"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		exeCandidates = append(exeCandidates,
+			filepath.Join(home, ".local", "bin", "claude.exe"),
+			filepath.Join(home, "bin", "claude.exe"),
+		)
+	}
+	for _, p := range exeCandidates {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return fmt.Sprintf(`"%s"%s`, p, argSuffix), nil
+		}
+	}
+	return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装（npm i -g @anthropic-ai/claude-code 或官方安装器）且位于 PATH / %APPDATA%\\npm")
+}
+
+// extIs 判断 path 扩展名是否匹配任一后缀（大小写不敏感）。
+func extIs(p string, exts ...string) bool {
+	e := strings.ToLower(filepath.Ext(p))
+	for _, x := range exts {
+		if e == x {
+			return true
+		}
+	}
+	return false
+}
+
+// WriteTerminal 把前端键盘输入（xterm.js onData）写给指定终端。
+func (s *MonitorService) WriteTerminal(id string, data string) error {
+	return s.pty.Write(id, []byte(data))
+}
+
+// ResizeTerminal 调整终端尺寸（xterm.js cols/rows 变化时）。
+func (s *MonitorService) ResizeTerminal(id string, cols int, rows int) error {
+	return s.pty.Resize(id, cols, rows)
+}
+
+// KillTerminal 终止指定终端会话（前端关 tab）。
+func (s *MonitorService) KillTerminal(id string) error {
+	s.pty.Kill(id)
+	return nil
+}
+
+// ListTerminals 列出所有活跃内置终端（前端列 tab / 调试用）。
+func (s *MonitorService) ListTerminals() []monitor.TerminalInfo {
+	return s.pty.List()
+}
+
+// CloseAllTerminals 关闭所有内置终端（应用退出前调用）。
+func (s *MonitorService) CloseAllTerminals() {
+	if s.pty != nil {
+		s.pty.CloseAll()
+	}
 }
 
 // ---- statusline 桥接 ----
@@ -298,7 +488,8 @@ type SettingsResult struct {
 	CloseQuits               bool   `json:"closeQuits"`
 	AutoStart                bool   `json:"autoStart"`
 	Version                  string `json:"version"`
-	LaunchWindowMode         string `json:"launchWindowMode"`         // show 显示窗口 / hide 最小化到任务栏
+	LaunchWindowMode         string `json:"launchWindowMode"`         // embedded 应用内置 / show 显示窗口 / hide 最小化到任务栏
+	EmbeddedAvailable        bool   `json:"embeddedAvailable"`        // 当前系统是否支持内置终端（ConPTY），前端据此灰显选项
 	EnterToSend              bool   `json:"enterToSend"`              // 回车直接发送
 	LaunchYolo               bool   `json:"launchYolo"`               // 新建实例使用 bypassPermissions 模式
 	AutoCheckClaudeSettings  bool   `json:"autoCheckClaudeSettings"`  // 每 10 秒检查 ~/.claude/settings.json
@@ -310,7 +501,7 @@ type SettingsResult struct {
 }
 
 // Version 应用版本号。
-const Version = "1.5.0"
+const Version = "1.5.1"
 
 // GetSettings 返回当前设置。
 func (s *MonitorService) GetSettings() *SettingsResult {
@@ -337,6 +528,7 @@ func (s *MonitorService) GetSettings() *SettingsResult {
 		AutoStart:                auto,
 		Version:                  Version,
 		LaunchWindowMode:         mode,
+		EmbeddedAvailable:        monitor.ConPTYSupported(),
 		EnterToSend:              cfg.EnterToSend,
 		LaunchYolo:               cfg.LaunchYolo,
 		AutoCheckClaudeSettings:  cfg.AutoCheckClaudeSettings,

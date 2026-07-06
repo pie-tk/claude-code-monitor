@@ -53,6 +53,32 @@ func resolveShell() string {
 	return "powershell"
 }
 
+// ResolveClaudePath 导出 resolveClaudePath，供内置终端解析 claude 路径（含运行实例枚举兜底）。
+func ResolveClaudePath() (string, error) {
+	return resolveClaudePath()
+}
+
+// BuildClaudeArgsForPTY 返回 claude 的额外命令行参数（不含可执行名），供内置终端拼接 cmdline。
+// LaunchYolo=true 时附加 --permission-mode bypassPermissions。
+func BuildClaudeArgsForPTY() string {
+	if GetSettings().LaunchYolo {
+		return "--permission-mode bypassPermissions"
+	}
+	return ""
+}
+
+// ResolveShellExe 返回系统默认 shell 的绝对路径（pwsh 优先，回退 powershell）。
+// 供内置终端 shell tab 使用——CreateProcessW 不自动搜 PATH，需要绝对路径。
+func ResolveShellExe() string {
+	if p, err := exec.LookPath("pwsh.exe"); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath("powershell.exe"); err == nil {
+		return p
+	}
+	return "powershell.exe"
+}
+
 // LaunchClaudeInDir 在 workdir 启动 claude，按 mode 决定终端窗口显示方式：
 //   - "show"：可见窗口
 //   - 默认（"hide"/"minimize"）：最小化窗口到任务栏（不抢焦点，可点击查看）
@@ -88,6 +114,7 @@ func LaunchClaudeInDir(workdir string, mode string) (string, error) {
 func launchClaude(abs string, minimized bool) (string, error) {
 	claudeArgs := buildClaudeArgs()
 	shell := resolveShell()
+	cleanEnv := CleanEnvSlice() // 干净环境，避免继承本进程可能被污染的 env（如 MSYS bash 的 HOME）
 
 	// 优先 Windows Terminal：与用户右键"打开终端"体验一致
 	if wt, err := exec.LookPath("wt.exe"); err == nil {
@@ -96,6 +123,9 @@ func launchClaude(abs string, minimized bool) (string, error) {
 			// -- 分隔 wt 选项与命令；CREATENEWPROCESSGROUP 防止 Ctrl+C 波及辅助进程
 			// -ExecutionPolicy Bypass 跳过执行策略提示
 			cmd := exec.Command(wt, "-d", abs, "--", shell, "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", claudeArgs)
+			if cleanEnv != nil {
+				cmd.Env = cleanEnv
+			}
 			cmd.SysProcAttr = &syscall.SysProcAttr{
 				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 			}
@@ -109,6 +139,9 @@ func launchClaude(abs string, minimized bool) (string, error) {
 			// 改用窗口类名 diff：启动前快照现有 CASCADIA 窗口，启动后只最小化新窗口。
 			existing := enumerateCascadiaWindows()
 			cmd := exec.Command(wt, "-d", abs, "--", shell, "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", claudeArgs)
+			if cleanEnv != nil {
+				cmd.Env = cleanEnv
+			}
 			cmd.SysProcAttr = &syscall.SysProcAttr{
 				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 			}
@@ -222,6 +255,9 @@ func startPowerShell(abs string, windowStyle string) (string, error) {
 		shell, escapedPath, windowStyle, claudeArgs,
 	)
 	cmd := exec.Command(shell, "-ExecutionPolicy", "Bypass", "-Command", psCmd)
+	if env := CleanEnvSlice(); env != nil {
+		cmd.Env = env // 外层 PowerShell 用干净 env；Start-Process 派生的内层窗口会继承
+	}
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("启动 PowerShell 失败: %w", err)
 	}

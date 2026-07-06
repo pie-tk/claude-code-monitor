@@ -1,6 +1,9 @@
 // 直接使用 Wails runtime Call.ByID，绕过自动绑定的循环依赖问题
 // ID 取自自动生成的 frontend/bindings/cc-console/service/monitorservice.js
 import { Call, Events } from "@wailsio/runtime";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 // Binding IDs (FNV-1a hash of "cc-console/service.MonitorService.<Method>")
 const ID_DETECT = 3511002957;
@@ -28,6 +31,11 @@ const ID_SAVE_LIST_PREFS = 3233443589; // SaveListPrefs(sortField, sortDir)
 const ID_ACT_ASK_ANSWER = 1941433663; // ActAskAnswer(pid, actionsJSON) — AskUserQuestion 按键序列注入
 const ID_GET_ACCOUNT_USAGE = 1426129106; // GetAccountUsage() — 账号用量（GLM 配额 / DeepSeek 余额）
 const ID_SAVE_TEXT_FILE = 4045929184; // SaveTextFile(filename, content) — 原生保存 Markdown/文本
+const ID_START_TERMINAL = 2611305340; // StartTerminal(kind, workdir) — 启动内置终端，返回 sessionId
+const ID_WRITE_TERMINAL = 484789539; // WriteTerminal(id, data) — 写入键盘输入
+const ID_RESIZE_TERMINAL = 4194224864; // ResizeTerminal(id, cols, rows) — 调整终端尺寸
+const ID_KILL_TERMINAL = 2250045032; // KillTerminal(id) — 终止内置终端
+const ID_LIST_TERMINALS = 2548176281; // ListTerminals() — 列出活跃内置终端
 
 // ---- State ----
 let currentPids = [];
@@ -137,7 +145,15 @@ let slashList = [];       // 全量命令/技能建议缓存
 let slashFiltered = [];   // 当前筛选结果
 let slashIdx = 0;         // 选中下标
 let slashOpen = false;    // 下拉是否展开
+let slashHintActive = false; // 参数提示行展示中（此模式放行 Enter/方向键，仅 Esc 关闭）
 let slashInput = null;    // 当前绑定的 textarea（chat-input 或 prompt-input）
+
+// ---- 斜杠使用统计（驱动补全排序：上次使用置顶，其余按次数降序，兜底字母序）----
+// 持久化于 localStorage，跨会话累积；acceptSlash 补全时更新。
+let slashUsage = {};
+let lastSlashName = '';
+try { slashUsage = JSON.parse(localStorage.getItem('cc-slash-usage') || '{}') || {}; } catch (e) { slashUsage = {}; }
+lastSlashName = localStorage.getItem('cc-slash-last') || '';
 
 // ---- 输入历史导航（↑/↓ 切换历史消息）----
 // 数据源：当前会话对话历史里的 user 真实消息 ∪ 本输入框发送历史栈，合并去重。
@@ -569,6 +585,7 @@ async function applyTheme() {
       root.style.setProperty(key, val);
     }
   }
+  applyTerminalTheme(info.isDark);
 }
 
 // ---- Refresh Loop ----
@@ -2999,9 +3016,20 @@ window.handleChatRewind = async function() {
   }
 };
 
-// handleChatShowWin：把该实例终端窗口置前，功能与首页卡片「窗口」按钮一致。
+// handleChatShowWin：内置终端实例 → 打开内置终端面板并切到对应 tab；外部实例 → 置前外部窗口。
 window.handleChatShowWin = async function() {
   if (!chatPanelPid) return;
+  // 按工作目录匹配内置终端 tab（内置实例无外部窗口，需打开内置面板）
+  var cwd = '';
+  var meta = instanceMeta[chatPanelPid];
+  if (meta && meta.cwd) cwd = meta.cwd;
+  var sid = cwd ? findTerminalTabByWorkdir(cwd) : null;
+  if (sid) {
+    openTerminalPanel();
+    switchTerminalTab(sid);
+    showChatHint('🪟 已打开内置终端');
+    return;
+  }
   try {
     await Call.ByID(ID_ACT_SHOW, chatPanelPid);
     showChatHint('🪟 已将该实例窗口置前');
@@ -4126,8 +4154,13 @@ function onSlashInput(e) {
     slashFiltered = slashList.filter(function(c) {
       return c.name.toLowerCase().indexOf(q) === 0;
     });
-    // 内置优先，其余按名称排序，保证列表稳定可预期
+    // 排序：上次使用的置顶 → 使用次数降序 → 内置优先 → 字母序（稳定可预期）
     slashFiltered.sort(function(a, b) {
+      if (a.name === lastSlashName) return -1;
+      if (b.name === lastSlashName) return 1;
+      var ca = (slashUsage[a.name] && slashUsage[a.name].count) || 0;
+      var cb = (slashUsage[b.name] && slashUsage[b.name].count) || 0;
+      if (ca !== cb) return cb - ca;
       if (a.type === 'builtin' && b.type !== 'builtin') return -1;
       if (b.type === 'builtin' && a.type !== 'builtin') return 1;
       return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
@@ -4223,11 +4256,38 @@ function acceptSlash() {
     slashInput.setSelectionRange(len, len);
     slashInput.focus();
   }
-  hideSlash();
+  // 记录使用统计（count + last），驱动下次排序：上次使用置顶、其余按次数降序
+  if (!slashUsage[c.name]) slashUsage[c.name] = { count: 0, last: 0 };
+  slashUsage[c.name].count++;
+  slashUsage[c.name].last = Date.now();
+  lastSlashName = c.name;
+  try {
+    localStorage.setItem('cc-slash-usage', JSON.stringify(slashUsage));
+    localStorage.setItem('cc-slash-last', c.name);
+  } catch (e) { /* localStorage 不可用时静默，仅本次会话生效 */ }
+  // 有参数用法提示则改展示提示行（继续输入即关闭）；否则直接关闭下拉
+  if (c.argHint) {
+    showSlashHint(c.argHint);
+  } else {
+    hideSlash();
+  }
+}
+
+// showSlashHint 补全选中带参数提示的命令后，下拉改显示一行用法提示；
+// 复用 slash-menu 容器。提示模式放行 Enter/方向键（让发送/编辑照常），仅 Esc 关闭；
+// 用户继续输入会触发 onSlashInput → hideSlash 自动关闭。
+function showSlashHint(text) {
+  slashOpen = true;
+  slashHintActive = true;
+  var menu = ensureSlashMenu();
+  menu.innerHTML = '<div class="slash-hint">' + escHtml(text) + '</div>';
+  positionSlashMenu();
+  menu.classList.remove("hidden");
 }
 
 function hideSlash() {
   slashOpen = false;
+  slashHintActive = false;
   var menu = document.getElementById("slash-menu");
   if (menu) menu.classList.add("hidden");
 }
@@ -4292,6 +4352,16 @@ async function doLaunchInstance(workdir) {
   try {
     var used = await Call.ByID(ID_LAUNCH_INSTANCE, workdir);
     if (used === "" || used == null) return; // 用户在文件夹框取消，静默
+    // 内置终端：后端返回 {"embedded":true,"sessionId":"term-N"}，前端登记终端 tab（不弹面板）
+    try {
+      var j = JSON.parse(used);
+      if (j && j.embedded && j.sessionId) {
+        openTerminalTab("claude", workdir, j.sessionId);
+        flashFoot("🚀 已在 " + (workdir ? workdir : "选定目录") + " 启动内置 claude（点「终端」查看）");
+        setTimeout(refresh, 1500);
+        return;
+      }
+    } catch (_) { /* 非 JSON，按外部窗口反馈处理 */ }
     flashFoot("🚀 已在 " + (workdir ? workdir : "选定目录") + " 用 " + used + " 启动 claude");
     setTimeout(refresh, 1500); // 加快新实例出现在监控列表
   } catch (e) {
@@ -4350,11 +4420,314 @@ window.sendPrompt = async function() {
   hidePromptModal();
 };
 
+// ---- 内置终端（ConPTY + xterm.js）----
+//
+// Go 端 ConPTY 跑 claude / pwsh / cmd，输出经 Wails 事件 term:output 推送（高频），
+// 键盘输入经 WriteTerminal 绑定回写。每个 tab 对应一个 xterm Terminal + 一个后端 session。
+// 关 tab 立即 Kill（不留后台）。claude 子进程仍照常被监控识别。
+var terms = {};           // id → { term, fit, kind, workdir, paneEl, tabEl, exited }
+var termOrder = [];       // tab 顺序（id 列表）
+var activeTermId = null;
+var pendingOutput = {};   // id → [string]：term 注册前到达的输出（防丢帧）
+var termResizeTimer = null;
+
+// ANSI 配色：light / dark 两套，跟随系统主题。
+var TERM_THEMES = {
+  dark: {
+    background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4",
+    selectionBackground: "#264f78",
+    black: "#000000", red: "#f48771", green: "#89d185", yellow: "#e2c08d",
+    blue: "#75beff", magenta: "#c586c0", cyan: "#56b6c2", white: "#d4d4d4",
+    brightBlack: "#808080", brightRed: "#f48771", brightGreen: "#89d185", brightYellow: "#e2c08d",
+    brightBlue: "#75beff", brightMagenta: "#c586c0", brightCyan: "#56b6c2", brightWhite: "#ffffff"
+  },
+  light: {
+    background: "#fbfbfa", foreground: "#37352f", cursor: "#37352f",
+    selectionBackground: "#cfe8fd",
+    black: "#000000", red: "#cd3131", green: "#0dbc79", yellow: "#b5890d",
+    blue: "#2472c8", magenta: "#bc3fbc", cyan: "#11a8cd", white: "#e5e5e5",
+    brightBlack: "#666666", brightRed: "#f14c4c", brightGreen: "#23d18b", brightYellow: "#f5f5f5",
+    brightBlue: "#3b8eea", brightMagenta: "#d670d6", brightCyan: "#29b8db", brightWhite: "#ffffff"
+  }
+};
+
+function termKindIcon(kind) {
+  if (kind === "claude") return "🤖";
+  if (kind === "cmd") return "📑";
+  return "🖥";
+}
+function termKindLabel(kind) {
+  if (kind === "claude") return "claude";
+  if (kind === "cmd") return "cmd";
+  if (kind === "pwsh" || kind === "shell") return "shell";
+  return kind || "term";
+}
+function basename(p) {
+  if (!p) return "";
+  var parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : p;
+}
+
+// 订阅后端事件（仅注册一次）。
+Events.On("term:output", function(ev) {
+  var d = ev && ev.data;
+  if (!d || !d.id) return;
+  var t = terms[d.id];
+  if (t && t.term) {
+    t.term.write(d.data || "");
+  } else {
+    // term 尚未注册（embedded 启动时输出先到）：缓存，注册时回放。
+    (pendingOutput[d.id] = pendingOutput[d.id] || []).push(d.data || "");
+  }
+});
+Events.On("term:exit", function(ev) {
+  var d = ev && ev.data;
+  if (!d || !d.id) return;
+  var t = terms[d.id];
+  if (!t) return;
+  t.exited = true;
+  if (t.tabEl) {
+    t.tabEl.classList.add("exited");
+    var lbl = t.tabEl.querySelector(".term-tab-label");
+    if (lbl) lbl.textContent = termKindLabel(t.kind) + " · 已退出";
+  }
+  if (t.term) t.term.write("\r\n\x1b[90m[进程已退出，代码 " + (d.exitCode != null ? d.exitCode : "?") + "]\x1b[0m\r\n");
+});
+
+function isTerminalPanelVisible() {
+  var o = document.getElementById("terminal-overlay");
+  return !!o && !o.classList.contains("hidden");
+}
+
+window.openTerminalPanel = function() {
+  var overlay = document.getElementById("terminal-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+  // 不自动新建 shell：仅打开面板。若已有 tab，挂载并 fit 当前 tab 的 xterm。
+  if (activeTermId && terms[activeTermId]) {
+    attachXterm(activeTermId);
+    setTimeout(function() {
+      fitActiveTerm();
+      var r = terms[activeTermId];
+      if (r && r.term) { try { r.term.focus(); } catch (_) {} }
+    }, 0);
+  }
+};
+
+window.closeTerminalPanel = function() {
+  var overlay = document.getElementById("terminal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+};
+
+// 新建终端 tab。presetSid 非空时复用后端已启动的 session（embedded 启动流程），否则现场 StartTerminal。
+// 只登记 tab 元数据 + tab 栏条目；xterm 挂载延迟到 tab 可见时（避免在 display:none 容器里 open 导致 0 尺寸）。
+// 返回 sid（成功）或 null（失败，不弹框——由调用方决定如何提示/回退）。
+window.openTerminalTab = async function(kind, workdir, presetSid) {
+  var sid = presetSid;
+  if (!sid) {
+    try {
+      sid = await Call.ByID(ID_START_TERMINAL, kind, workdir);
+    } catch (e) {
+      return null;
+    }
+    if (!sid) return null;
+  }
+
+  // 登记 tab 元数据（暂不创建 xterm，等面板可见再 attachXterm）
+  var rec = { term: null, fit: null, kind: kind, workdir: workdir, paneEl: null, exited: false };
+  terms[sid] = rec;
+
+  // tab 栏条目
+  var tabEl = document.createElement("div");
+  tabEl.className = "term-tab";
+  tabEl.setAttribute("data-id", sid);
+  var icon = document.createElement("span");
+  icon.className = "term-tab-icon";
+  icon.textContent = termKindIcon(kind);
+  var lbl = document.createElement("span");
+  lbl.className = "term-tab-label";
+  lbl.textContent = termKindLabel(kind) + (workdir ? " · " + basename(workdir) : "");
+  var close = document.createElement("span");
+  close.className = "term-tab-close";
+  close.textContent = "✕";
+  close.title = "关闭";
+  close.onclick = function(ev) { ev.stopPropagation(); closeTerminalTab(sid); };
+  tabEl.appendChild(icon);
+  tabEl.appendChild(lbl);
+  tabEl.appendChild(close);
+  tabEl.onclick = function() { switchTerminalTab(sid); };
+  document.getElementById("terminal-tabs").appendChild(tabEl);
+  rec.tabEl = tabEl;
+
+  termOrder.push(sid);
+  activeTermId = sid;
+  // 切 tab 栏高亮（paneEl 此时可能还没创建）
+  Object.keys(terms).forEach(function(tid) {
+    if (terms[tid] && terms[tid].tabEl) terms[tid].tabEl.classList.toggle("active", tid === sid);
+  });
+  updateTerminalEmpty();
+
+  // 面板可见才挂载 xterm；面板隐藏时（如「新建会话」内置启动）等用户开面板再挂载
+  if (isTerminalPanelVisible()) {
+    attachXterm(sid);
+    setTimeout(function() {
+      fitActiveTerm();
+      var r = terms[sid];
+      if (r && r.term) { try { r.term.focus(); } catch (_) {} }
+    }, 0);
+  }
+  return sid;
+};
+
+// 「＋」新建终端：优先 PowerShell，启动失败回退 CMD。
+window.openNewTerminal = async function() {
+  var sid = await openTerminalTab("shell", "");
+  if (!sid) sid = await openTerminalTab("cmd", "");
+  if (!sid) flashFoot("启动终端失败：未找到 PowerShell 或 CMD");
+};
+
+// 挂载 xterm 到已登记的 tab（创建 paneEl、Terminal、open、绑事件、回放缓存输出）。幂等。
+function attachXterm(id) {
+  var rec = terms[id];
+  if (!rec || rec.term) return; // 已挂载或不存在
+  var body = document.getElementById("terminal-body");
+  if (!body) return;
+
+  var paneEl = document.createElement("div");
+  paneEl.className = "xterm-pane";
+  paneEl.setAttribute("data-id", id);
+  if (id !== activeTermId) paneEl.classList.add("hidden");
+  body.appendChild(paneEl);
+
+  var term = new Terminal({
+    fontFamily: 'Consolas, "Cascadia Mono", Menlo, monospace',
+    fontSize: 13,
+    cursorBlink: true,
+    theme: TERM_THEMES[document.body.classList.contains("dark") ? "dark" : "light"],
+    allowProposedApi: true,
+    scrollback: 5000
+  });
+  var fit = new FitAddon();
+  term.loadAddon(fit);
+  term.open(paneEl);
+  rec.term = term;
+  rec.fit = fit;
+  rec.paneEl = paneEl;
+
+  // 回放缓存输出（挂载前到达的输出）
+  if (pendingOutput[id]) {
+    pendingOutput[id].forEach(function(chunk) { term.write(chunk); });
+    delete pendingOutput[id];
+  }
+
+  // 键盘输入 → 后端
+  term.onData(function(data) { Call.ByID(ID_WRITE_TERMINAL, id, data); });
+  // 尺寸变化 → 后端（0 尺寸跳过，避免破坏 claude TUI 布局）
+  term.onResize(function(sz) {
+    if (sz.cols > 0 && sz.rows > 0) Call.ByID(ID_RESIZE_TERMINAL, id, sz.cols, sz.rows);
+  });
+}
+
+window.switchTerminalTab = function(id) {
+  if (!terms[id]) return;
+  activeTermId = id;
+  // 切到可见 tab 时才挂载 xterm（若尚未）
+  if (isTerminalPanelVisible()) attachXterm(id);
+  Object.keys(terms).forEach(function(tid) {
+    var r = terms[tid];
+    var active = (tid === id);
+    if (r.tabEl) r.tabEl.classList.toggle("active", active);
+    if (r.paneEl) r.paneEl.classList.toggle("hidden", !active);
+  });
+  // 切换后 xterm 才可见，需重新 fit 才能正确测量
+  setTimeout(function() {
+    var r = terms[id];
+    if (r && r.term) { try { r.fit.fit(); } catch (_) {} try { r.term.focus(); } catch (_) {} }
+  }, 0);
+};
+
+window.closeTerminalTab = function(id) {
+  var r = terms[id];
+  if (!r) return;
+  // 后端终止（fire-and-forget；已退出的会话后端已移除，调用无副作用）
+  Call.ByID(ID_KILL_TERMINAL, id);
+  if (r.term) { try { r.term.dispose(); } catch (_) {} }
+  if (r.paneEl && r.paneEl.parentNode) r.paneEl.parentNode.removeChild(r.paneEl);
+  if (r.tabEl && r.tabEl.parentNode) r.tabEl.parentNode.removeChild(r.tabEl);
+  delete terms[id];
+  delete pendingOutput[id];
+  var i = termOrder.indexOf(id);
+  if (i >= 0) termOrder.splice(i, 1);
+  if (activeTermId === id) {
+    activeTermId = termOrder.length ? termOrder[termOrder.length - 1] : null;
+    if (activeTermId) switchTerminalTab(activeTermId);
+  }
+  updateTerminalEmpty();
+};
+
+function updateTerminalEmpty() {
+  var empty = document.getElementById("terminal-empty");
+  if (!empty) return;
+  empty.style.display = termOrder.length ? "none" : "flex";
+}
+
+function fitActiveTerm() {
+  if (!activeTermId || !terms[activeTermId] || !terms[activeTermId].fit) return;
+  try { terms[activeTermId].fit.fit(); } catch (_) {}
+}
+
+// 终端面板键盘处理：面板打开时 Escape 关闭，其余按键交给 xterm 自己处理（document 监听器早退）。
+function terminalKeyHandler(e) {
+  var overlay = document.getElementById("terminal-overlay");
+  if (!overlay || overlay.classList.contains("hidden")) return false;
+  if (e.key === "Escape") {
+    closeTerminalPanel();
+    return true;
+  }
+  return true; // 面板内按键一律不触发其它全局逻辑，xterm textarea 已先行处理
+}
+
+// 按工作目录匹配内置终端 tab（用于「窗口」按钮定位内置实例）。
+// 归一化比较（斜杠统一、去末尾分隔符、小写）；多个匹配取最近创建的。
+function findTerminalTabByWorkdir(cwd) {
+  if (!cwd) return null;
+  var norm = function(p) { return ('' + p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); };
+  var target = norm(cwd);
+  for (var i = termOrder.length - 1; i >= 0; i--) {
+    var tid = termOrder[i];
+    if (terms[tid] && norm(terms[tid].workdir) === target) return tid;
+  }
+  return null;
+}
+
+// 跟随系统主题刷新所有终端配色
+function applyTerminalTheme(isDark) {
+  if (typeof terms === 'undefined' || !terms) return; // boot 早期调用时终端模块尚未初始化
+  var theme = TERM_THEMES[isDark ? "dark" : "light"];
+  Object.keys(terms).forEach(function(tid) {
+    if (terms[tid] && terms[tid].term) {
+      try { terms[tid].term.options.theme = theme; } catch (_) {}
+    }
+  });
+}
+
+// 窗口缩放 → 重新 fit 活动终端（防抖）
+window.addEventListener("resize", function() {
+  if (termResizeTimer) clearTimeout(termResizeTimer);
+  termResizeTimer = setTimeout(fitActiveTerm, 150);
+});
+
 document.addEventListener("keydown", function(e) {
   if (newInstanceKeyHandler(e)) return;
+  if (terminalKeyHandler(e)) return;
 
   // 斜杠命令下拉导航（对话面板 / 发送对话框均可触发）：菜单展开时拦截方向键、
   // Enter/Tab（补全而非发送）、Esc（仅关菜单）。必须在发送键判断之前处理。
+  // 参数提示行模式：放行 Enter/Tab/方向键（让发送与编辑照常），仅 Esc 关闭提示
+  if (slashHintActive) {
+    if (e.key === "Escape") { e.preventDefault(); hideSlash(); }
+    return;
+  }
   if (slashOpen) {
     if (e.key === "ArrowDown") { e.preventDefault(); navigateSlash(1); return; }
     if (e.key === "ArrowUp") { e.preventDefault(); navigateSlash(-1); return; }
@@ -4468,7 +4841,17 @@ window.showSettings = async function() {
     document.getElementById("toggle-auto-start").checked = s.autoStart;
     document.getElementById("about-version").textContent = "版本 " + (s.version || "--");
     var modeSelect = document.getElementById("select-launch-mode");
-    if (modeSelect) modeSelect.value = s.launchWindowMode || "hide";
+    if (modeSelect) {
+      modeSelect.value = s.launchWindowMode || "hide";
+      // 当前系统不支持内置终端（ConPTY 不可用）→ 灰显 embedded 选项，回退到 hide
+      var embOpt = modeSelect.querySelector('option[value="embedded"]');
+      if (embOpt) {
+        var avail = s.embeddedAvailable !== false;
+        embOpt.disabled = !avail;
+        embOpt.textContent = avail ? "应用内置终端" : "应用内置终端（当前系统不支持）";
+        if (!avail && modeSelect.value === "embedded") modeSelect.value = "hide";
+      }
+    }
     var sendToggle = document.getElementById("toggle-enter-to-send");
     if (sendToggle) sendToggle.checked = !!s.enterToSend;
     var yoloToggle = document.getElementById("toggle-launch-yolo");

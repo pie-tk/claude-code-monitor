@@ -2918,3 +2918,166 @@ body.dark .diff-del { color: #FF7369; background: rgba(255,115,105,0.12); }
   text-overflow: ellipsis;
   min-width: 0;
 }
+.slash-hint {
+  margin: 4px;
+  padding: 6px 12px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 8.5pt;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== 内置终端面板（ConPTY + xterm.js） ===== */
+.terminal-btn {
+  background: var(--card-bg);
+  color: var(--secondary-text);
+  border: 1px solid var(--card-border);
+  font-size: 9pt;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 10px;
+  margin-left: 8px;
+  line-height: 1;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+}
+.terminal-btn:hover {
+  color: var(--window-text);
+  background: var(--card-hover-bg);
+  border-color: var(--secondary-text);
+}
+
+.terminal-dialog {
+  background: var(--window-bg);
+  border-radius: 10px;
+  width: 92vw;
+  max-width: 1600px;
+  height: 90vh;
+  max-height: 1200px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--divider);
+  flex-shrink: 0;
+  background: var(--panel-bg);
+}
+
+.terminal-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.terminal-tabs::-webkit-scrollbar { height: 6px; }
+
+.term-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 5px 10px;
+  font-size: 9pt;
+  color: var(--secondary-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.term-tab:hover { background: var(--card-hover-bg); color: var(--window-text); }
+.term-tab.active {
+  color: var(--window-text);
+  background: var(--card-hover-bg);
+  border-color: var(--card-border);
+}
+.term-tab-icon { font-size: 10pt; line-height: 1; }
+.term-tab-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.term-tab.exited { opacity: 0.5; font-style: italic; }
+.term-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 9pt;
+  color: var(--subtle-text);
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.term-tab:hover .term-tab-close,
+.term-tab.active .term-tab-close { opacity: 1; }
+.term-tab-close:hover { background: var(--danger); color: #FFF; }
+
+.terminal-new-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--secondary-text);
+  cursor: pointer;
+  font-size: 12pt;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.terminal-new-btn:hover { background: var(--card-hover-bg); color: var(--window-text); }
+
+.terminal-close-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--subtle-text);
+  cursor: pointer;
+  font-size: 11pt;
+  flex-shrink: 0;
+}
+.terminal-close-btn:hover { background: var(--card-hover-bg); color: var(--window-text); }
+
+.terminal-body {
+  flex: 1 1 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--window-bg);
+}
+.terminal-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--subtle-text);
+  font-size: 10pt;
+}
+.xterm-pane {
+  position: absolute;
+  inset: 0;
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+.xterm-pane.hidden { display: none; }
+.terminal-body .xterm { font-family: Consolas, "Cascadia Mono", Menlo, monospace; height: 100%; }
+.terminal-body .xterm-viewport { overflow-y: auto; }

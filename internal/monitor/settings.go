@@ -16,7 +16,7 @@ type Settings struct {
 	AutoCheckClaudeSettings  bool             `json:"autoCheckClaudeSettings"`  // 每 10 秒检查 ~/.claude/settings.json 是否仍满足监控器要求
 	AutoRepairClaudeSettings bool             `json:"autoRepairClaudeSettings"` // 检测到漂移后是否自动修复 ~/.claude/settings.json
 	RecentDirs               []string         `json:"recentDirs"`               // 最近工作目录（≤8，最近在前）
-	LaunchWindowMode         string           `json:"launchWindowMode"`         // 启动终端窗口模式: show 显示 / hide 最小化到任务栏
+	LaunchWindowMode         string           `json:"launchWindowMode"`         // 启动终端模式: embedded 应用内置终端 / show 显示外部窗口 / hide 最小化到任务栏
 	EnterToSend              bool             `json:"enterToSend"`              // 回车直接发送（默认 true）；false 时 Shift+Enter 发送
 	LaunchYolo               bool             `json:"launchYolo"`               // 新建实例时使用 bypassPermissions 模式（默认 true）
 	WindowWidth              int              `json:"windowWidth"`              // 主窗口宽度（启动恢复用）
