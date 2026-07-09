@@ -24,9 +24,10 @@ const stdinData = await new Promise((resolve) => {
   setTimeout(finish, 500);
 });
 
-// 2. spawn slhook.exe 写 live(fire-and-forget,同目录)
+// 2. spawn slhook 写 live(fire-and-forget,同目录)——spawn 名按平台
 try {
-  const slhook = path.join(path.dirname(process.argv[1]), 'cc-console-sl.exe');
+  const slhookName = process.platform === 'win32' ? 'cc-console-sl.exe' : 'cc-console-sl';
+  const slhook = path.join(path.dirname(process.argv[1]), slhookName);
   if (fs.existsSync(slhook)) {
     const sl = spawn(slhook, [], { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
     sl.stdin.on('error', () => {});
