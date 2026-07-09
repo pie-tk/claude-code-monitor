@@ -50,17 +50,23 @@ iconutil -c icns "$STAGE/icon.iconset" -o "$STAGE/icons.icns"
 echo "==> [3/6] universal 二进制（arm64 + amd64 lipo）"
 mkdir -p bin
 LDFLAGS="-s -w"
-# amd64 交叉编译需显式启用 CGO：Wails v3 的 pkg/mac 是 cgo（Objective-C），
-# 在 Apple Silicon 上 GOARCH=amd64 会令 go 默认 CGO_ENABLED=0 → cgo 文件被排除 → 编译失败。
-# 指定 clang -target x86_64-apple-darwin 即可用系统 SDK 交叉编译 amd64。
+# 两个架构都显式启用 CGO 并指定 cgo target，使脚本 host-agnostic：
+# Wails v3 的 pkg/mac 是 cgo（Objective-C），
+#   - 在 Apple Silicon 上 GOARCH=amd64 会令 go 默认 CGO_ENABLED=0 → cgo 文件被排除 → 编译失败；
+#   - 在 Intel（x86_64）host 上跑 GOARCH=arm64 时，cgo（ObjC）若交由 host 默认 clang 会编成 amd64，
+#     与 Go 的 arm64 代码架构不匹配 → 链接失败。
+# 显式指定 clang -target（arm64-apple-darwin / x86_64-apple-darwin）后，无论 host 是
+# Apple Silicon 还是 Intel Mac，另一架构都能用系统 SDK 正确交叉编译。
+# 前提：装了 Xcode/CLT 的 clang。
 export CGO_ENABLED=1
+ARM64_CC="clang -target arm64-apple-darwin"
 AMD64_CC="clang -target x86_64-apple-darwin"
 # 主程序
-GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-arm64" .
+CGO_ENABLED=1 GOARCH=arm64 CC="$ARM64_CC" go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-arm64" .
 CGO_ENABLED=1 GOARCH=amd64 CC="$AMD64_CC" go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-amd64" .
 lipo -create -output "$STAGE/cc-console" "$STAGE/cc-console-arm64" "$STAGE/cc-console-amd64"
 # slhook 桥接二进制
-GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-sl-arm64" ./cmd/slhook
+CGO_ENABLED=1 GOARCH=arm64 CC="$ARM64_CC" go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-sl-arm64" ./cmd/slhook
 CGO_ENABLED=1 GOARCH=amd64 CC="$AMD64_CC" go build -ldflags="$LDFLAGS" -o "$STAGE/cc-console-sl-amd64" ./cmd/slhook
 lipo -create -output "$STAGE/cc-console-sl" "$STAGE/cc-console-sl-arm64" "$STAGE/cc-console-sl-amd64"
 
