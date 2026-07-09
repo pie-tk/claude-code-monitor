@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -72,12 +73,24 @@ const (
 var lifecycleHookEvents = []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 
 const (
+	bridgeMjsName = "bridge.mjs"
+	slhookMarker  = "bridge.mjs" // statusLine.command 含此串即表示已由我们接管(node 入口)
+	hookModeArg   = "--hook"
+)
+
+// slhookExeName / hookCommandTag 平台相关：Windows 为 cc-console-sl.exe，其它平台无 .exe。
+// 用 var + init 分支（const 无法按运行时平台取值）。
+var (
 	slhookExeName  = "cc-console-sl.exe"
-	bridgeMjsName  = "bridge.mjs"
-	slhookMarker   = "bridge.mjs" // statusLine.command 含此串即表示已由我们接管(node 入口)
-	hookModeArg    = "--hook"
 	hookCommandTag = "cc-console-sl.exe"
 )
+
+func init() {
+	if runtime.GOOS != "windows" {
+		slhookExeName = "cc-console-sl"
+		hookCommandTag = "cc-console-sl"
+	}
+}
 
 // processCmdline 返回 pid 的命令行(小写),失败返回 ""。平台特定。
 var processCmdline func(pid int) string

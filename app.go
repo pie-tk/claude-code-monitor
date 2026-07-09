@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
 	"time"
 
 	"cc-console/internal/crashlog"
@@ -43,6 +48,10 @@ func runWailsApp() {
 		},
 		Windows: application.WindowsOptions{
 			DisableQuitOnLastWindowClosed: true, // 关闭窗口不退出，托盘控制退出
+		},
+		// macOS：ActivationPolicyRegular 让 app 作为常规 GUI 应用，Dock 显示图标。
+		Mac: application.MacOptions{
+			ActivationPolicy: application.ActivationPolicyRegular,
 		},
 	})
 
@@ -144,4 +153,26 @@ func runWailsApp() {
 func quitApp(svc *service.MonitorService, app *application.App) {
 	svc.CloseAllTerminals()
 	app.Quit()
+}
+
+// ensureDarwinPATH 把登录 shell 的 PATH 注入当前进程。
+// macOS GUI(Finder/Dock)启动时默认 PATH 仅 /usr/bin:/bin，找不到 nvm/homebrew 装的 claude；
+// 从交互 zsh 取完整 PATH 注入。Windows 无此问题，故仅 darwin 执行。
+func ensureDarwinPATH() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// 5s 超时取登录 shell 的 PATH（含 ~/.nvm/.../bin、/opt/homebrew/bin）
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "zsh", "-lic", `printf '%s' "$PATH"`)
+	if out, err := cmd.Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" {
+			os.Setenv("PATH", p)
+			return
+		}
+	}
+	// 回退：现有 PATH 追加常见 mac 路径
+	cur := os.Getenv("PATH")
+	os.Setenv("PATH", cur+":/opt/homebrew/bin:/usr/local/bin")
 }
