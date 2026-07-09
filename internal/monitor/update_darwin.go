@@ -16,6 +16,9 @@ import (
 
 // DownloadAndReplace 下载 dmg 并打开挂载（Finder 显示），提示用户拖拽到「应用程序」替换。
 // macOS 无法像 Windows 那样静默替换运行中的 .app，故下载完成后交给用户手动安装。
+//
+// signature 在 macOS 更新路径不校验：dmg 由用户手动拖拽安装，minisign 静默校验意义有限；
+// 参数保留以对齐 DownloadAndReplace 跨平台签名契约（service 层统一传 Signature）。
 func DownloadAndReplace(downloadURL, signature string, onProgress func(downloaded, total int64)) error {
 	tmp, err := os.MkdirTemp("", "cc-console-update")
 	if err != nil {
@@ -80,7 +83,7 @@ func DownloadAndReplace(downloadURL, signature string, onProgress func(downloade
 			nw, writeErr := f.Write(buf[:n])
 			if writeErr != nil {
 				f.Close()
-				os.Remove(dmgPath)
+				os.RemoveAll(tmp) // 清理整个临时目录（含 dmg 文件），避免 orphan 目录
 				return fmt.Errorf("写入文件失败: %w", writeErr)
 			}
 			written += int64(nw)
@@ -97,14 +100,14 @@ func DownloadAndReplace(downloadURL, signature string, onProgress func(downloade
 				break
 			}
 			f.Close()
-			os.Remove(dmgPath)
+			os.RemoveAll(tmp) // 清理整个临时目录（含 dmg 文件），避免 orphan 目录
 			return fmt.Errorf("读取下载流失败: %w", readErr)
 		}
 	}
 	f.Close()
 
 	if written < minSize {
-		os.Remove(dmgPath)
+		os.RemoveAll(tmp) // 清理整个临时目录（含 dmg 文件），避免 orphan 目录
 		return fmt.Errorf("下载不完整: 仅收到 %.1f MB", float64(written)/(1024*1024))
 	}
 
