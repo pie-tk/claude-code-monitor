@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/style.css">
   <title>CC Console</title>
-  <script type="module" crossorigin src="/assets/index-C2XDfaXO.js"></script>
+  <script type="module" crossorigin src="/assets/index-CBSpE8Va.js"></script>
   <link rel="stylesheet" crossorigin href="/assets/index-BrP-ENHg.css">
 </head>
 <body>
@@ -220,12 +220,12 @@
     </div>
   </div>
 
-  <!-- 内置终端面板（ConPTY + xterm.js） -->
+  <!-- 内置终端面板（PTY + xterm.js） -->
   <div id="terminal-overlay" class="modal-overlay hidden" onclick="if(event.target===this) closeTerminalPanel()">
     <div class="terminal-dialog" id="terminal-dialog">
       <div class="terminal-header">
         <div class="terminal-tabs" id="terminal-tabs"></div>
-        <button class="terminal-new-btn" id="terminal-new-btn" title="新建终端（PowerShell，失败回退 CMD）" onclick="openNewTerminal()">＋</button>
+        <button class="terminal-new-btn" id="terminal-new-btn" title="新建终端（系统 shell）" onclick="openNewTerminal()">＋</button>
         <span class="flex-spacer"></span>
         <button class="terminal-close-btn" onclick="closeTerminalPanel()" title="关闭">✕</button>
       </div>
@@ -279,7 +279,7 @@
             <div class="settings-item">
               <div class="settings-item-text">
                 <span class="settings-label">新建实例终端</span>
-                <span class="settings-desc">选择新实例的运行方式。内置终端在应用内打开，不弹出额外窗口；外部窗口调用系统 PowerShell 或 Windows Terminal</span>
+                <span class="settings-desc">选择新实例的运行方式。内置终端在应用内打开，不弹出额外窗口；外部窗口调用系统终端（Terminal.app/iTerm2/Windows Terminal）</span>
               </div>
               <select id="select-launch-mode" class="settings-select" onchange="saveSetting('launchMode', this.value)">
                 <option value="embedded">应用内置终端</option>

@@ -4579,11 +4579,12 @@ window.openTerminalTab = async function(kind, workdir, presetSid) {
   return sid;
 };
 
-// 「＋」新建终端：优先 PowerShell，启动失败回退 CMD。
+// 「＋」新建终端：统一使用 shell kind。
+// macOS/Linux → zsh/bash（经 service buildTerminalCmdlineDarwin 解析 $SHELL）；
+// Windows → PowerShell（service 层 shell kind 仍映射 PowerShell）。不再回退 CMD。
 window.openNewTerminal = async function() {
   var sid = await openTerminalTab("shell", "");
-  if (!sid) sid = await openTerminalTab("cmd", "");
-  if (!sid) flashFoot("启动终端失败：未找到 PowerShell 或 CMD");
+  if (!sid) flashFoot("启动终端失败：未找到可用 shell 终端，请检查终端配置");
 };
 
 // 挂载 xterm 到已登记的 tab（创建 paneEl、Terminal、open、绑事件、回放缓存输出）。幂等。
