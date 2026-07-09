@@ -39,3 +39,6 @@ latest.json
 # 临时截图与构建产物（不提交）
 tmp-*.png
 rsrc.syso
+
+# macOS 打包产物（build-mac.sh 产出的 .app / DMG / 临时 stage，绝不提交）
+/bin/
