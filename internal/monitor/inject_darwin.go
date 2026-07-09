@@ -5,6 +5,8 @@ package monitor
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -173,12 +175,28 @@ func (d *darwinInjector) CloseInstance(pid int) (string, error) {
 	return closeExternalInstance(pid)
 }
 
-// showExternalWindow / closeExternalInstance 在 Task 8 实现（外部终端注入）。
-// 此处先提供占位返回，保证 Task 6 独立可编译；Task 8 替换为真实实现。
+// showExternalWindow 尽力 activate 外部终端窗口（限 Terminal.app / iTerm2）。
+// 非保证：若 claude 跑在 VSCode 等内嵌终端，activate 目标不准。
 func showExternalWindow(pid int) error {
-	return fmt.Errorf("外部终端 ShowWindow 尚未实现")
+	// 先尝试 Terminal.app
+	if err := exec.Command("osascript", "-e", `tell application "Terminal" to activate`).Run(); err == nil {
+		return nil
+	}
+	// 回退 iTerm2
+	if err := exec.Command("osascript", "-e", `tell application "iTerm2" to activate`).Run(); err == nil {
+		return nil
+	}
+	return fmt.Errorf("未找到 Terminal.app/iTerm2 可激活窗口")
 }
 
+// closeExternalInstance 尽力终止外部 claude 进程（直接 kill，无法关闭其宿主终端窗口）。
 func closeExternalInstance(pid int) (string, error) {
-	return "", fmt.Errorf("外部终端 CloseInstance 尚未实现")
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return "", fmt.Errorf("PID %d 不存在", pid)
+	}
+	if err := proc.Kill(); err != nil {
+		return "", fmt.Errorf("终止 PID %d 失败: %w", pid, err)
+	}
+	return fmt.Sprintf("已终止 PID %d（宿主终端窗口需手动关闭）", pid), nil
 }
