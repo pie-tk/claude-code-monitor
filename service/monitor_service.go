@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ type MonitorService struct {
 
 // NewMonitorService 创建服务实例。
 func NewMonitorService() *MonitorService {
-	return &MonitorService{pty: monitor.NewPTYRegistry()}
+	return &MonitorService{pty: monitor.GetPTYRegistry()}
 }
 
 // SetApp 在 ServiceStartup 中设置 app 引用。
@@ -318,6 +319,9 @@ func (s *MonitorService) StartTerminal(kind string, workdir string) (string, err
 
 // buildTerminalCmdline 按 kind 拼接可执行文件命令行（含绝对路径，CreateProcessW 需要）。
 func buildTerminalCmdline(kind, workdir string) (string, error) {
+	if runtime.GOOS == "darwin" {
+		return buildTerminalCmdlineDarwin(kind)
+	}
 	switch kind {
 	case "claude":
 		return buildClaudeCmdline()
@@ -330,6 +334,22 @@ func buildTerminalCmdline(kind, workdir string) (string, error) {
 		return fmt.Sprintf(`"%s" -NoLogo`, monitor.ResolveShellExe()), nil
 	default:
 		return "", fmt.Errorf("未知终端类型: %s", kind)
+	}
+}
+
+// buildTerminalCmdlineDarwin macOS 终端命令行（交给 /bin/sh -c 执行）。
+func buildTerminalCmdlineDarwin(kind string) (string, error) {
+	switch kind {
+	case "claude":
+		return buildClaudeCmdline()
+	case "shell", "":
+		sh := monitor.ResolveShellExe()
+		if sh == "" {
+			sh = "/bin/zsh"
+		}
+		return sh, nil
+	default:
+		return "", fmt.Errorf("macOS 不支持终端类型: %s", kind)
 	}
 }
 
@@ -346,6 +366,14 @@ func buildClaudeCmdline() (string, error) {
 	argSuffix := ""
 	if args != "" {
 		argSuffix = " " + args
+	}
+
+	if runtime.GOOS == "darwin" {
+		// macOS：claude 是编译二进制，LookPath 直接命中（无 .cmd 包装器）。
+		if p, err := exec.LookPath("claude"); err == nil {
+			return fmt.Sprintf("%s%s", p, argSuffix), nil
+		}
+		return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装且位于 PATH")
 	}
 
 	// 1. 收集 claude.cmd 候选（包装器，优先）。
