@@ -424,7 +424,7 @@ func buildClaudeCmdline() (string, error) {
 			return fmt.Sprintf(`"%s"%s`, p, argSuffix), nil
 		}
 	}
-	return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装（npm i -g @anthropic-ai/claude-code 或官方安装器）且位于 PATH / %APPDATA%\\npm")
+	return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装（npm i -g @anthropic-ai/claude-code 或官方安装器）且位于 PATH / %%APPDATA%%\\npm")
 }
 
 // extIs 判断 path 扩展名是否匹配任一后缀（大小写不敏感）。
