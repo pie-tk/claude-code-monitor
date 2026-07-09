@@ -43,6 +43,9 @@ func isClaudeCommand(cmd string) bool {
 	if strings.Contains(low, "/applications/claude.app/") {
 		return false
 	}
+	if strings.Contains(low, "bridge.mjs") {
+		return false // statusline 的 node bridge.mjs 层, 路径可能含 claude(如 ~/.claude/...), 须排除
+	}
 	if hasClaudeBinaryArgv0(cmd) {
 		return true
 	}

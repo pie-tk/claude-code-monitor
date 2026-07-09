@@ -42,6 +42,8 @@ func TestIsClaudeCmdlineCompiledBinary(t *testing.T) {
 		{"/Users/x/.nvm/versions/node/v25/bin/claude --dangerously-skip-permissions", true}, // 全路径 argv0
 		{"/Users/x/.pencil/mcp/cursor/out/mcp-server-darwin-arm64 --app cursor --agent claudeCodeCLI", false}, // MCP server 含 claude 子串
 		{"/bin/zsh -c echo claude", false},                                    // shell wrapper
+		// statusline 的 node bridge.mjs 层：路径含 claude（如 ~/.claude/...），须排除
+		{"node /Users/x/.nvm/.../bin/node \"/Users/x/.claude/cc-console/bridge.mjs\"", false},
 	}
 	for _, c := range cases {
 		got := isClaudeCmdline(c.line)

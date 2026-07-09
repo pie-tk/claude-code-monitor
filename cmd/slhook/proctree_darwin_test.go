@@ -20,6 +20,8 @@ func TestIsClaudeCommand(t *testing.T) {
 		{"/bin/zsh", false},
 		{"node /x/server.js", false},
 		{"git status", false},
+		// statusline 的 node bridge.mjs 层：路径含 claude（如 ~/.claude/...），须排除
+		{"node /Users/x/.nvm/.../bin/node \"/Users/x/.claude/cc-console/bridge.mjs\"", false},
 	}
 	for _, c := range cases {
 		if got := isClaudeCommand(c.cmd); got != c.want {
