@@ -371,7 +371,11 @@ func buildClaudeCmdline() (string, error) {
 	if runtime.GOOS == "darwin" {
 		// macOS：claude 是编译二进制，LookPath 直接命中（无 .cmd 包装器）。
 		if p, err := exec.LookPath("claude"); err == nil {
-			return fmt.Sprintf("%s%s", p, argSuffix), nil
+			// exec 让 claude 替换 /bin/sh：StartPTYSession 用 /bin/sh -c 启动内嵌终端，
+			// 若无 exec，sh 会 fork claude，PTY 注册的是 sh 的 pid（≠ claude pid），而注入
+			//（SendPrompt/Clear/Rewind/Ask）按 detector 检测到的 claude pid 查 SessionByPID
+			// → 永不命中 → 内嵌实例注入全失败（报「该实例非内嵌终端」）。exec 后 pid 与 claude 一致。
+			return fmt.Sprintf("exec %q%s", p, argSuffix), nil
 		}
 		return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装且位于 PATH")
 	}
