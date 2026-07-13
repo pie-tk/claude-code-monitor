@@ -112,7 +112,7 @@ func (s *MonitorService) ActRewind(pid int) error {
 	return monitor.Injector.SendRewind(pid)
 }
 
-// ActPrompt 向目标实例发送文本。
+// ActPrompt 向目标实例发送文本（换行/回车统一拍平为空格，由注入层追加回车提交）。
 func (s *MonitorService) ActPrompt(pid int, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("输入不能为空")

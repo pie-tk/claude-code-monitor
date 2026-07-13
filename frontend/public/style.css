@@ -2064,6 +2064,42 @@ body.dark .chat-tool-result.err .chat-tool-result-text { color: #FF7369; }
   color: var(--subtle-text);
 }
 
+/* 外部终端实例提示横幅：macOS 无法注入外部终端，置灰输入区并引导切到终端窗口 */
+.chat-external-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 20px 0;
+  padding: 8px 12px;
+  font-size: 9.5pt;
+  line-height: 1.6;
+  color: var(--window-text);
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 6px;
+}
+.chat-external-notice.hidden { display: none; }
+.chat-external-notice-icon { flex-shrink: 0; }
+.chat-external-notice-btn {
+  margin: 0 2px;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 9.5pt;
+  color: var(--accent, #2563eb);
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.chat-external-notice-btn:hover { opacity: 0.75; }
+/* 外部实例时输入框 / 发送 / 回溯 置灰不可点（窗口按钮 #chat-win-btn 保留可点，用于切到终端）*/
+.chat-input-area.is-locked #chat-input,
+.chat-input-area.is-locked #chat-send-btn,
+.chat-input-area.is-locked #chat-rewind-btn {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 /* Input area */
 .chat-input-area {
   display: flex;

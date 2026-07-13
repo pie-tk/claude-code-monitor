@@ -122,6 +122,21 @@
     </div>
   </div>
 
+  <!-- 通用确认对话框（替代原生 confirm：mac WKWebView 无 JS dialog UI delegate，原生 confirm() 静默返回 false，导致关闭/清空/更新等所有确认类操作在 mac 上点了没反应）-->
+  <div id="confirm-overlay" class="modal-overlay hidden" onclick="if(event.target===this) confirmCancel()">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span class="modal-emoji">⚠️</span>
+        <span class="modal-title" id="confirm-title">请确认</span>
+      </div>
+      <div class="modal-subtitle" id="confirm-msg" style="white-space:pre-wrap;line-height:1.6"></div>
+      <div class="modal-buttons">
+        <button class="btn btn-cancel" onclick="confirmCancel()">取消</button>
+        <button class="btn btn-send" onclick="confirmOk()">确定</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 新建实例面板 -->
   <div id="new-instance-overlay" class="modal-overlay hidden" onclick="if(event.target===this) closeNewInstancePanel()">
     <div class="modal-dialog new-instance-dialog">
@@ -181,6 +196,10 @@
         <span>等待你的选择...</span>
       </div>
       <div id="chat-quick-replies" class="chat-quick-replies hidden"></div>
+      <div id="chat-external-notice" class="chat-external-notice hidden">
+        <span class="chat-external-notice-icon">🔒</span>
+        <span class="chat-external-notice-body">这是<b>外部终端</b>启动的实例，macOS 不允许向其注入输入，无法在此直接发送。<button class="chat-external-notice-btn" onclick="handleChatShowWin()">显示终端窗口 ↗</button>切到终端直接交互，或用「新建」开一个可交互的内置终端实例。</span>
+      </div>
       <div class="chat-input-area">
         <div class="chat-input-main">
           <textarea id="chat-input" class="chat-input" placeholder="输入消息，Enter 发送，Shift+Enter 换行..." rows="4"></textarea>

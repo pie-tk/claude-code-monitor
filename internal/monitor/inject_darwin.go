@@ -90,7 +90,7 @@ func (d *darwinInjector) SendClear(pid int) error {
 	if ok, err := writePTY(pid, "/clear\r"); ok {
 		return err
 	}
-	return fmt.Errorf("该实例非内嵌终端，外部终端不支持 clear 注入（建议用内嵌实例）")
+	return fmt.Errorf("该实例为外部终端启动，macOS 不允许注入：无法远程 /clear。请在「窗口」切到的终端里直接输入 /clear")
 }
 
 func (d *darwinInjector) SendRewind(pid int) error {
@@ -98,7 +98,7 @@ func (d *darwinInjector) SendRewind(pid int) error {
 	if ok, err := writePTY(pid, "\x1b\x1b"); ok {
 		return err
 	}
-	return fmt.Errorf("该实例非内嵌终端，外部终端不支持 rewind 注入")
+	return fmt.Errorf("该实例为外部终端启动，macOS 不允许注入：无法远程回溯。请在「窗口」切到的终端里按两次 Esc")
 }
 
 func (d *darwinInjector) SendPrompt(pid int, text string) error {
@@ -110,7 +110,7 @@ func (d *darwinInjector) SendPrompt(pid int, text string) error {
 		_, err = writePTY(pid, "\r")
 		return err
 	}
-	return fmt.Errorf("该实例非内嵌终端，外部终端不支持 prompt 注入")
+	return fmt.Errorf("该实例为外部终端启动，macOS 不允许注入：无法在此发送。请点「窗口」切到终端直接输入，或用「新建」开内置终端实例")
 }
 
 func (d *darwinInjector) SendAskAnswer(pid int, actions string) error {
@@ -126,7 +126,7 @@ func (d *darwinInjector) SendAskAnswer(pid int, actions string) error {
 		}
 		ok, err := writePTY(pid, s)
 		if !ok {
-			return fmt.Errorf("该实例非内嵌终端，外部终端不支持 ask 注入")
+			return fmt.Errorf("该实例为外部终端启动，macOS 不允许注入：无法远程回答。请在「窗口」切到的终端里直接操作")
 		}
 		if err != nil {
 			return err
