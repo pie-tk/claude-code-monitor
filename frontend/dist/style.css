@@ -832,6 +832,9 @@ body.dark .card-bridge-tag { color: #f59e0b; background: rgba(245,158,11,0.15); 
   z-index: 1000;
 }
 .modal-overlay.hidden { display: none; }
+/* confirmDialog 必须高于 settings-overlay(1000) 及其内部子弹窗(rules overlay 1200)，
+   否则从设置内触发"下载并安装更新"时确认框被设置弹窗遮挡、不可见不可点 */
+#confirm-overlay { z-index: 1300; }
 
 .modal-dialog {
   background: var(--window-bg);

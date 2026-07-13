@@ -70,6 +70,11 @@ func LoadSettings() error {
 		return nil // 文件不存在 → 用默认值
 	}
 	json.Unmarshal(data, &currentSettings)
+	// 迁移：mac 上外部窗口(hide)实例无法注入/交互，等于丢失核心能力。历史配置（或从 Windows
+	// 拷贝来的配置）若残留 hide，强制校正为 embedded；仅校正内存值，用户下次保存设置时自然落盘。
+	if runtime.GOOS == "darwin" && currentSettings.LaunchWindowMode == "hide" {
+		currentSettings.LaunchWindowMode = defaultLaunchMode()
+	}
 	return nil
 }
 

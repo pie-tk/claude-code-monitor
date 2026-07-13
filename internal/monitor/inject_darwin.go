@@ -107,8 +107,16 @@ func (d *darwinInjector) SendPrompt(pid int, text string) error {
 			return err
 		}
 		time.Sleep(50 * time.Millisecond) // 给 claude（编译二进制）消费文本的时间
-		_, err = writePTY(pid, "\r")
-		return err
+		// 检查回车写入的 ok：若实例在此 50ms 窗口内退出（从注册表注销），writePTY 返回 (false,nil)，
+		// 不可误报成功——否则前端乐观显示"已发送"但 claude 从未收到回车，提示永不提交。
+		ok2, werr := writePTY(pid, "\r")
+		if werr != nil {
+			return werr
+		}
+		if !ok2 {
+			return fmt.Errorf("实例在提交回车时已退出，消息未送达")
+		}
+		return nil
 	}
 	return fmt.Errorf("该实例为外部终端启动，macOS 不允许注入：无法在此发送。请点「窗口」切到终端直接输入，或用「新建」开内置终端实例")
 }

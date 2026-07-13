@@ -44,7 +44,7 @@ let footTimer = null;
 let sortField = 'startedAt';
 let sortDir = 'desc';
 let chatPanelPid = null;
-let embeddedPids = new Set(); // 内置终端实例 pid 集合（refresh 时由 ListTerminals 更新）；不在集合内的为外部终端实例，macOS 无法注入
+let embeddedPids = null; // 可注入的内置终端 pid 集合（refresh 时由 ListTerminals 更新）。null=尚未加载（乐观不锁，避免首屏误判）；仅 macOS 用于区分不可注入的外部终端实例
 let usageState = null; // 账号级用量（GLM 配额 / DeepSeek 余额，全局唯一，与实例解耦）
 let chatHistoryHash = 0;
 let chatRefreshTimer = null;
@@ -2481,6 +2481,9 @@ function flashFoot(msg) {
 var confirmResolveFn = null;
 function confirmDialog(msg, title) {
   return new Promise(function(resolve) {
+    // 重入保护：若上一次 confirm 仍未结算（如确认框被遮挡、用户再次触发同一动作），
+    // 先把旧的按"取消"结算，避免 confirmResolveFn 被覆盖后旧 Promise 永不 settle、调用方永久挂起。
+    if (confirmResolveFn) { confirmResolveFn(false); confirmResolveFn = null; }
     confirmResolveFn = resolve;
     document.getElementById("confirm-msg").textContent = msg;
     document.getElementById("confirm-title").textContent = title || "请确认";
@@ -2557,9 +2560,30 @@ window.handleCloseSession = async function(e, pid) {
 
 // ---- Chat Panel ----
 
-// isEmbeddedPid 判断 pid 是否内置终端实例（可注入）。外部终端实例 macOS 无法注入输入。
+// isMacOS 判定是否运行在 macOS（WKWebView）。输入锁逻辑仅 macOS 需要：
+// Windows 的 AttachConsole 按 PID 注入，所有检测到的 claude 实例都可注入，不应锁定；
+// 仅 macOS 的外部 Terminal.app 实例无法注入，才需区分内置/外部。
+function isMacOS() {
+  var p = (navigator.platform || '') + ' ' + (navigator.userAgent || '');
+  return /mac/i.test(p);
+}
+
+// isEmbeddedPid 判断 pid 是否可注入的内置终端实例。
+// - 非 macOS（Windows）：一律可注入，返回 true（避免误锁可注入实例）。
+// - macOS：仅 PTYRegistry 内置实例可注入；embeddedPids 尚未加载（null）时乐观返回 true，避免首屏误锁。
 function isEmbeddedPid(pid) {
+  if (!isMacOS()) return true;
+  if (embeddedPids === null) return true; // ListTerminals 首次返回前不锁
   return pid != null && embeddedPids.has(pid);
+}
+
+// guardExternalSend 统一守卫：当前面板（或指定 pid）指向不可注入的外部实例时拦截并提示。
+// 所有发送/交互入口复用，保证防御一致（输入框已锁，按钮也不应绕过）。
+function guardExternalSend(optPid) {
+  var pid = (optPid != null) ? optPid : chatPanelPid;
+  if (!pid || isEmbeddedPid(pid)) return false;
+  flashFoot("🔒 这是外部终端实例，macOS 无法直接发送，请点「窗口」切到终端输入");
+  return true;
 }
 
 // updateChatInputLockState 根据当前 chatPanelPid 是否内置终端，锁定/解锁输入区
@@ -2624,7 +2648,8 @@ window.openChatPanel = async function(pid) {
   } else {
     document.getElementById("chat-overlay").classList.remove("hidden");
   }
-  document.getElementById("chat-input").focus();
+  // 仅可注入实例抢占焦点；外部实例输入框已置灰，避免焦点落入仍可键盘输入的锁定字段。
+  if (isEmbeddedPid(chatPanelPid)) document.getElementById("chat-input").focus();
   bindChatChangeResizer();
   applyChatChangePanelWidth();
 
@@ -3046,6 +3071,7 @@ window.closeChatPanel = function(opts) {
   askCustomEditor = null; // 关面板清掉内联自定义编辑器态
   // 不重置 ask 多问追踪(保留中途进度,重开面板可续上)
   if (chatRefreshTimer) { clearInterval(chatRefreshTimer); chatRefreshTimer = null; }
+  updateChatInputLockState(); // 复位锁态：chatPanelPid 已置 null，移除 is-locked 与外部横幅，避免残留
 };
 
 // ---- 聊天面板回溯 ----
@@ -3273,10 +3299,7 @@ function renderChatMessages(messages) {
 
 window.sendChatMessage = async function() {
   if (!chatPanelPid) return;
-  if (!isEmbeddedPid(chatPanelPid)) {
-    flashFoot("🔒 这是外部终端实例，macOS 无法直接发送，请点「窗口」切到终端输入");
-    return;
-  }
+  if (guardExternalSend()) return;
   var input = document.getElementById("chat-input");
   var text = input.value.trim();
   if (!text) return;
@@ -3788,6 +3811,7 @@ function detectInteraction(messages) {
 // 结果点击第 2 题选项时,第 1 题和第 2 题同时被误答。故这里恢复同步方向键。
 window.navAskQuestion = function(delta) {
   if (!askToolUseId) return;
+  if (guardExternalSend()) return;
   var next = askQuestionIndex + delta;
   if (next < 0) next = 0;
   if (next > askQuestionCount) next = askQuestionCount;
@@ -3810,6 +3834,7 @@ window.navAskQuestion = function(delta) {
 // kind='plan'/'perm' → value 是 '1'/'2'/'3'/'y'/'n',发文本(ActPrompt)。
 window.sendQuickReply = async function(value, kind) {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   try {
     var optimisticText = String(value);
     if (kind === 'ask') {
@@ -3859,6 +3884,7 @@ window.sendQuickReply = async function(value, kind) {
 // submitMultiSelect 提交当前多选题的所有勾选:构造多选按键序列注入终端。
 window.submitMultiSelect = async function() {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   var state = askPicksState();
   var picks = state.picks || {};
   var indices = Object.keys(picks).map(Number).sort(function(a, b) { return a - b; });
@@ -4034,6 +4060,7 @@ window.onAskCustomInputKey = function(e) {
 
 window.confirmAskCustom = async function() {
   if (!chatPanelPid || !askCustomEditor) return;
+  if (guardExternalSend()) return;
   var input = document.getElementById('ask-custom-inline-input');
   var text = input ? input.value.trim() : '';
   if (!text) { showChatHint('自定义内容不能为空'); return; }
@@ -4069,6 +4096,7 @@ window.confirmAskCustom = async function() {
 
 window.sendAskCustomOption = async function() {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   var cur = currentAskQuestion();
   var custom = currentAskCustomOption();
   if (!custom) { startAskCustom('create'); return; }
@@ -4460,6 +4488,7 @@ window.hidePromptModal = function() {
 
 window.sendPrompt = async function() {
   if (!promptTargetPid) return;
+  if (guardExternalSend(promptTargetPid)) return;
   var text = document.getElementById("prompt-input").value.trim();
   if (!text) return;
   try {
