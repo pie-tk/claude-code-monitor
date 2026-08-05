@@ -47,6 +47,10 @@ func main() {
 		}
 	}
 
+	// GUI 路径：注入 darwin 登录 shell 的 PATH（解决 GUI 启动时 LookPath(claude)
+	// 找不到 nvm/homebrew）。Windows 无此问题，函数内部按 runtime.GOOS 守卫。
+	ensureDarwinPATH()
+
 	// GUI 路径：初始化崩溃日志，捕获 panic / Go runtime fatal error 堆栈到
 	// ~/.cc-console/logs/monitor.log。CLI --list 模式不重定向，保持终端输出正常。
 	crashlog.Setup(monitorLogDir())

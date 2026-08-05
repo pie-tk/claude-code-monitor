@@ -1,12 +1,12 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package monitor
 
-// SetAutoStart 非 Windows 平台暂不支持。
+// SetAutoStart 非 Windows/macOS 平台暂不支持。
 func SetAutoStart(bool) error { return nil }
 
-// IsAutoStartEnabled 非 Windows 平台暂不支持。
+// IsAutoStartEnabled 非 Windows/macOS 平台暂不支持。
 func IsAutoStartEnabled() (bool, error) { return false, nil }
 
-// cleanupLegacyAutoStart 非 Windows 平台无需处理。
+// cleanupLegacyAutoStart 非 Windows/macOS 平台无需处理。
 func cleanupLegacyAutoStart() {}

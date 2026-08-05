@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -72,19 +73,37 @@ func CheckLatestRelease() (*ReleaseInfo, error) {
 		return nil, fmt.Errorf("解析 manifest 失败: %w", err)
 	}
 
-	win, ok := m.Platforms["windows-x86_64"]
+	key := currentPlatformKey()
+	plat, ok := m.Platforms[key]
 	if !ok {
-		return nil, fmt.Errorf("manifest 缺少 windows-x86_64 平台信息")
+		return nil, fmt.Errorf("manifest 缺少 %s 平台信息", key)
 	}
 
 	return &ReleaseInfo{
 		Version:     strings.TrimPrefix(m.Version, "v"),
 		Name:        m.Version,
 		Body:        m.Notes,
-		DownloadURL: win.URL,
-		Signature:   win.Signature,
+		DownloadURL: plat.URL,
+		Signature:   plat.Signature,
 		PublishedAt: m.PubDate,
 	}, nil
+}
+
+// currentPlatformKey 返回当前平台的 manifest 资产 key。
+func currentPlatformKey() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return darwinPlatformKey(runtime.GOARCH)
+	case "windows":
+		return "windows-x86_64"
+	}
+	return runtime.GOOS + "-" + runtime.GOARCH
+}
+
+// darwinPlatformKey 生成 darwin 资产 key：darwin-arm64 / darwin-amd64。
+// universal 发布可用 darwin-universal（此时由调用方覆盖 GOARCH）。
+func darwinPlatformKey(arch string) string {
+	return "darwin-" + arch
 }
 
 // IsNewer 比较两个语义化版本，latest > current 时返回 true。

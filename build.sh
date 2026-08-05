@@ -30,8 +30,10 @@ cd frontend && npm run build && cd ..
 echo ""
 echo "=== 2/7 嵌入 Windows 图标资源 ==="
 # rsrc 用于将 ICO 嵌入 Windows PE 资源（桌面/任务栏图标）
+# 输出文件名带 _windows 后缀，使 Go 仅在 GOOS=windows 链接该 .syso；
+# 否则无后缀的 rsrc.syso（COFF）会被 darwin/linux 链接，导致 ld 报 "unknown file type"。
 RSRC="$(go env GOPATH | tr -d '"')/bin/rsrc"
-"$RSRC" -ico icon.ico -o rsrc.syso
+"$RSRC" -ico icon.ico -o rsrc_windows.syso
 
 echo ""
 echo "=== 3/7 Go 编译便携版 ==="

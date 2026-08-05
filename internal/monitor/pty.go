@@ -30,6 +30,13 @@ func NewPTYRegistry() *PTYRegistry {
 	return &PTYRegistry{sessions: make(map[string]*ptySession)}
 }
 
+// ptyRegistry 是进程级唯一的内置终端注册表。service 层（管理会话）与 inject 层（按 pid 注入）
+// 共享同一实例：service 用 GetPTYRegistry() 拿引用，inject_darwin 用包级 ptyRegistry 直接访问。
+var ptyRegistry = NewPTYRegistry()
+
+// GetPTYRegistry 返回进程级内置终端注册表。
+func GetPTYRegistry() *PTYRegistry { return ptyRegistry }
+
 func (r *PTYRegistry) nextID() string {
 	return fmt.Sprintf("term-%d", atomic.AddUint64(&r.counter, 1))
 }
@@ -105,4 +112,16 @@ func (r *PTYRegistry) CloseAll() {
 	for _, s := range list {
 		s.Close()
 	}
+}
+
+// SessionByPID 按 pid 反查 session id（遍历各 session 的 info().PID）。供注入层判断某 pid 是否内嵌实例。
+func (r *PTYRegistry) SessionByPID(pid uint32) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		if s.info().PID == pid {
+			return s.id, true
+		}
+	}
+	return "", false
 }

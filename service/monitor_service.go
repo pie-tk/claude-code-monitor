@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ type MonitorService struct {
 
 // NewMonitorService 创建服务实例。
 func NewMonitorService() *MonitorService {
-	return &MonitorService{pty: monitor.NewPTYRegistry()}
+	return &MonitorService{pty: monitor.GetPTYRegistry()}
 }
 
 // SetApp 在 ServiceStartup 中设置 app 引用。
@@ -111,7 +112,7 @@ func (s *MonitorService) ActRewind(pid int) error {
 	return monitor.Injector.SendRewind(pid)
 }
 
-// ActPrompt 向目标实例发送文本。
+// ActPrompt 向目标实例发送文本（换行/回车统一拍平为空格，由注入层追加回车提交）。
 func (s *MonitorService) ActPrompt(pid int, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("输入不能为空")
@@ -318,6 +319,9 @@ func (s *MonitorService) StartTerminal(kind string, workdir string) (string, err
 
 // buildTerminalCmdline 按 kind 拼接可执行文件命令行（含绝对路径，CreateProcessW 需要）。
 func buildTerminalCmdline(kind, workdir string) (string, error) {
+	if runtime.GOOS == "darwin" {
+		return buildTerminalCmdlineDarwin(kind)
+	}
 	switch kind {
 	case "claude":
 		return buildClaudeCmdline()
@@ -330,6 +334,22 @@ func buildTerminalCmdline(kind, workdir string) (string, error) {
 		return fmt.Sprintf(`"%s" -NoLogo`, monitor.ResolveShellExe()), nil
 	default:
 		return "", fmt.Errorf("未知终端类型: %s", kind)
+	}
+}
+
+// buildTerminalCmdlineDarwin macOS 终端命令行（交给 /bin/sh -c 执行）。
+func buildTerminalCmdlineDarwin(kind string) (string, error) {
+	switch kind {
+	case "claude":
+		return buildClaudeCmdline()
+	case "shell", "":
+		sh := monitor.ResolveShellExe()
+		if sh == "" {
+			sh = "/bin/zsh"
+		}
+		return sh, nil
+	default:
+		return "", fmt.Errorf("macOS 不支持终端类型: %s", kind)
 	}
 }
 
@@ -346,6 +366,18 @@ func buildClaudeCmdline() (string, error) {
 	argSuffix := ""
 	if args != "" {
 		argSuffix = " " + args
+	}
+
+	if runtime.GOOS == "darwin" {
+		// macOS：claude 是编译二进制，LookPath 直接命中（无 .cmd 包装器）。
+		if p, err := exec.LookPath("claude"); err == nil {
+			// exec 让 claude 替换 /bin/sh：StartPTYSession 用 /bin/sh -c 启动内嵌终端，
+			// 若无 exec，sh 会 fork claude，PTY 注册的是 sh 的 pid（≠ claude pid），而注入
+			//（SendPrompt/Clear/Rewind/Ask）按 detector 检测到的 claude pid 查 SessionByPID
+			// → 永不命中 → 内嵌实例注入全失败（报「该实例非内嵌终端」）。exec 后 pid 与 claude 一致。
+			return fmt.Sprintf("exec %q%s", p, argSuffix), nil
+		}
+		return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装且位于 PATH")
 	}
 
 	// 1. 收集 claude.cmd 候选（包装器，优先）。
@@ -396,7 +428,7 @@ func buildClaudeCmdline() (string, error) {
 			return fmt.Sprintf(`"%s"%s`, p, argSuffix), nil
 		}
 	}
-	return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装（npm i -g @anthropic-ai/claude-code 或官方安装器）且位于 PATH / %APPDATA%\\npm")
+	return "", fmt.Errorf("未找到 claude 可执行文件，请确认 Claude Code 已安装（npm i -g @anthropic-ai/claude-code 或官方安装器）且位于 PATH / %%APPDATA%%\\npm")
 }
 
 // extIs 判断 path 扩展名是否匹配任一后缀（大小写不敏感）。

@@ -44,6 +44,7 @@ let footTimer = null;
 let sortField = 'startedAt';
 let sortDir = 'desc';
 let chatPanelPid = null;
+let embeddedPids = null; // 可注入的内置终端 pid 集合（refresh 时由 ListTerminals 更新）。null=尚未加载（乐观不锁，避免首屏误判）；仅 macOS 用于区分不可注入的外部终端实例
 let usageState = null; // 账号级用量（GLM 配额 / DeepSeek 余额，全局唯一，与实例解耦）
 let chatHistoryHash = 0;
 let chatRefreshTimer = null;
@@ -596,6 +597,12 @@ async function refresh() {
     const stale = (result && result.stale) || [];
     const stats = (result && result.stats) || {};
 
+    // 同步内置终端 pid 集合：区分可注入的内置实例与外部终端实例（macOS 后者无法注入）
+    try {
+      const terms = await Call.ByID(ID_LIST_TERMINALS);
+      embeddedPids = new Set((terms || []).map(function(t) { return t.pid; }));
+    } catch (_) { /* ListTerminals 不可用时保持旧集合 */ }
+
     updateStats(stats);
     updateClock();
     renderCards(live, stale);
@@ -619,6 +626,7 @@ async function refresh() {
     if (chatPanelPid !== null) {
       refreshChatMessages(chatPanelPid);
       renderChatStats(chatPanelPid);
+      updateChatInputLockState(); // 内置/外部状态可能变化（首次 ListTerminals 到达后需刷新锁态）
     }
     // chat 布局下刷新左侧会话标签（实例增减 / 主题变化 / 选中变化）；
     // 若未选中任何会话但有运行中实例，自动选中首个（覆盖首次进入 chat 模式 / 新实例出现）
@@ -2466,14 +2474,39 @@ function flashFoot(msg) {
   }, 3000);
 }
 
+// ---- 通用确认对话框（替代原生 confirm）----
+// macOS WKWebView 未实现 JS dialog UI delegate，原生 confirm() 静默返回 false，
+// 导致所有「先确认再执行」的操作（关闭/清空/下载更新）在 mac 上点击无反应（!confirm() 恒真 → return）。
+// 改用自定义 modal 返回 Promise<boolean>，跨平台一致；alert 同理静默，错误统一走 flashFoot。
+var confirmResolveFn = null;
+function confirmDialog(msg, title) {
+  return new Promise(function(resolve) {
+    // 重入保护：若上一次 confirm 仍未结算（如确认框被遮挡、用户再次触发同一动作），
+    // 先把旧的按"取消"结算，避免 confirmResolveFn 被覆盖后旧 Promise 永不 settle、调用方永久挂起。
+    if (confirmResolveFn) { confirmResolveFn(false); confirmResolveFn = null; }
+    confirmResolveFn = resolve;
+    document.getElementById("confirm-msg").textContent = msg;
+    document.getElementById("confirm-title").textContent = title || "请确认";
+    document.getElementById("confirm-overlay").classList.remove("hidden");
+  });
+}
+window.confirmOk = function() {
+  document.getElementById("confirm-overlay").classList.add("hidden");
+  if (confirmResolveFn) { confirmResolveFn(true); confirmResolveFn = null; }
+};
+window.confirmCancel = function() {
+  document.getElementById("confirm-overlay").classList.add("hidden");
+  if (confirmResolveFn) { confirmResolveFn(false); confirmResolveFn = null; }
+};
+
 // ---- Action Handlers ----
 window.handleClear = async function(pid) {
-  if (!confirm("确定要清空 PID " + pid + " 的会话吗？\n此操作将清除当前对话内容。")) return;
+  if (!(await confirmDialog("确定要清空 PID " + pid + " 的会话吗？\n此操作将清除当前对话内容。", "清空会话对话"))) return;
   try {
     await Call.ByID(ID_ACT_CLEAR, pid);
     flashFoot("✓  已向 PID " + pid + " 发送 /clear");
   } catch (e) {
-    alert("清空失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 清空失败: " + (e && e.message ? e.message : e));
   }
 };
 
@@ -2492,7 +2525,7 @@ window.handleShowWin = async function(pid) {
     await Call.ByID(ID_ACT_SHOW, pid);
     flashFoot("🪟  已将 PID " + pid + " 的窗口置前");
   } catch (e) {
-    alert("操作失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 操作失败: " + (e && e.message ? e.message : e));
   }
 };
 
@@ -2508,7 +2541,7 @@ window.handleCloseSession = async function(e, pid) {
     + title + '\nPID ' + pid + '\n\n'
     + '确认后会先终止对应 Claude Code 进程，然后尽量关闭对应的终端窗口。'
     + '\n如果终端宿主可能是 Windows Terminal 多标签或 IDE 共享窗口，会为了安全保留。';
-  if (!confirm(msg)) return;
+  if (!(await confirmDialog(msg, "关闭 Claude Code 会话"))) return;
   closingPids[pid] = true;
   sessionTabsSig = '';
   renderSessionTabs();
@@ -2517,7 +2550,7 @@ window.handleCloseSession = async function(e, pid) {
     flashFoot('🛑  ' + (resultMsg || ('已关闭 PID ' + pid + ' 的 Claude Code')));
     await refresh();
   } catch (err) {
-    alert('关闭失败: ' + (err && err.message ? err.message : err));
+    flashFoot("❌ 关闭失败: " + (err && err.message ? err.message : err));
   } finally {
     delete closingPids[pid];
     sessionTabsSig = '';
@@ -2526,6 +2559,43 @@ window.handleCloseSession = async function(e, pid) {
 };
 
 // ---- Chat Panel ----
+
+// isMacOS 判定是否运行在 macOS（WKWebView）。输入锁逻辑仅 macOS 需要：
+// Windows 的 AttachConsole 按 PID 注入，所有检测到的 claude 实例都可注入，不应锁定；
+// 仅 macOS 的外部 Terminal.app 实例无法注入，才需区分内置/外部。
+function isMacOS() {
+  var p = (navigator.platform || '') + ' ' + (navigator.userAgent || '');
+  return /mac/i.test(p);
+}
+
+// isEmbeddedPid 判断 pid 是否可注入的内置终端实例。
+// - 非 macOS（Windows）：一律可注入，返回 true（避免误锁可注入实例）。
+// - macOS：仅 PTYRegistry 内置实例可注入；embeddedPids 尚未加载（null）时乐观返回 true，避免首屏误锁。
+function isEmbeddedPid(pid) {
+  if (!isMacOS()) return true;
+  if (embeddedPids === null) return true; // ListTerminals 首次返回前不锁
+  return pid != null && embeddedPids.has(pid);
+}
+
+// guardExternalSend 统一守卫：当前面板（或指定 pid）指向不可注入的外部实例时拦截并提示。
+// 所有发送/交互入口复用，保证防御一致（输入框已锁，按钮也不应绕过）。
+function guardExternalSend(optPid) {
+  var pid = (optPid != null) ? optPid : chatPanelPid;
+  if (!pid || isEmbeddedPid(pid)) return false;
+  flashFoot("🔒 这是外部终端实例，macOS 无法直接发送，请点「窗口」切到终端输入");
+  return true;
+}
+
+// updateChatInputLockState 根据当前 chatPanelPid 是否内置终端，锁定/解锁输入区
+// 并显隐外部实例提示横幅。macOS 外部终端实例无法注入：输入区置灰 + 引导切到终端窗口。
+function updateChatInputLockState() {
+  var notice = document.getElementById("chat-external-notice");
+  var area = document.querySelector(".chat-input-area");
+  if (!notice || !area) return;
+  var external = chatPanelPid !== null && !isEmbeddedPid(chatPanelPid);
+  notice.classList.toggle("hidden", !external);
+  area.classList.toggle("is-locked", external);
+}
 
 window.openChatPanel = async function(pid) {
   chatPanelPid = pid;
@@ -2540,6 +2610,7 @@ window.openChatPanel = async function(pid) {
   markdownDownloads = {};
   procReset();
   loadSlashSuggestions(pid); // 预载斜杠命令/技能供消息框补全
+  updateChatInputLockState(); // 外部终端实例：置灰输入区 + 显示引导横幅
   // 注意:不重置 ask 多问追踪状态——用户可能关闭面板后重开,中途的多问进度
   // (askQuestionIndex)应保留;重置交给 injectInteractivePrompts 在 tool_use ID 变化时做。
 
@@ -2577,7 +2648,8 @@ window.openChatPanel = async function(pid) {
   } else {
     document.getElementById("chat-overlay").classList.remove("hidden");
   }
-  document.getElementById("chat-input").focus();
+  // 仅可注入实例抢占焦点；外部实例输入框已置灰，避免焦点落入仍可键盘输入的锁定字段。
+  if (isEmbeddedPid(chatPanelPid)) document.getElementById("chat-input").focus();
   bindChatChangeResizer();
   applyChatChangePanelWidth();
 
@@ -2999,6 +3071,7 @@ window.closeChatPanel = function(opts) {
   askCustomEditor = null; // 关面板清掉内联自定义编辑器态
   // 不重置 ask 多问追踪(保留中途进度,重开面板可续上)
   if (chatRefreshTimer) { clearInterval(chatRefreshTimer); chatRefreshTimer = null; }
+  updateChatInputLockState(); // 复位锁态：chatPanelPid 已置 null，移除 is-locked 与外部横幅，避免残留
 };
 
 // ---- 聊天面板回溯 ----
@@ -3226,6 +3299,7 @@ function renderChatMessages(messages) {
 
 window.sendChatMessage = async function() {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   var input = document.getElementById("chat-input");
   var text = input.value.trim();
   if (!text) return;
@@ -3235,6 +3309,7 @@ window.sendChatMessage = async function() {
   btn.textContent = "发送中...";
 
   try {
+    flashFoot("发送中… PID " + chatPanelPid);
     await Call.ByID(ID_ACT_PROMPT, chatPanelPid, text);
     input.value = "";
     input.style.height = ""; // 重置 textarea 高度
@@ -3260,7 +3335,7 @@ window.sendChatMessage = async function() {
     refreshChatMessages(chatPanelPid);
     setTimeout(function() { if (chatPanelPid) refreshChatMessages(chatPanelPid); }, 2000);
   } catch (e) {
-    alert("发送失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 发送失败: " + (e && e.message ? e.message : e));
   }
   btn.disabled = false;
   btn.textContent = "发送";
@@ -3736,6 +3811,7 @@ function detectInteraction(messages) {
 // 结果点击第 2 题选项时,第 1 题和第 2 题同时被误答。故这里恢复同步方向键。
 window.navAskQuestion = function(delta) {
   if (!askToolUseId) return;
+  if (guardExternalSend()) return;
   var next = askQuestionIndex + delta;
   if (next < 0) next = 0;
   if (next > askQuestionCount) next = askQuestionCount;
@@ -3758,6 +3834,7 @@ window.navAskQuestion = function(delta) {
 // kind='plan'/'perm' → value 是 '1'/'2'/'3'/'y'/'n',发文本(ActPrompt)。
 window.sendQuickReply = async function(value, kind) {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   try {
     var optimisticText = String(value);
     if (kind === 'ask') {
@@ -3800,13 +3877,14 @@ window.sendQuickReply = async function(value, kind) {
     refreshChatMessages(chatPanelPid);
     setTimeout(function() { if (chatPanelPid) refreshChatMessages(chatPanelPid); }, 2000);
   } catch (e) {
-    alert("发送失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 发送失败: " + (e && e.message ? e.message : e));
   }
 };
 
 // submitMultiSelect 提交当前多选题的所有勾选:构造多选按键序列注入终端。
 window.submitMultiSelect = async function() {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   var state = askPicksState();
   var picks = state.picks || {};
   var indices = Object.keys(picks).map(Number).sort(function(a, b) { return a - b; });
@@ -3861,7 +3939,7 @@ window.submitMultiSelect = async function() {
     refreshChatMessages(chatPanelPid);
     setTimeout(function() { if (chatPanelPid) refreshChatMessages(chatPanelPid); }, 2000);
   } catch (e) {
-    alert("发送失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 发送失败: " + (e && e.message ? e.message : e));
   }
 };
 
@@ -3982,6 +4060,7 @@ window.onAskCustomInputKey = function(e) {
 
 window.confirmAskCustom = async function() {
   if (!chatPanelPid || !askCustomEditor) return;
+  if (guardExternalSend()) return;
   var input = document.getElementById('ask-custom-inline-input');
   var text = input ? input.value.trim() : '';
   if (!text) { showChatHint('自定义内容不能为空'); return; }
@@ -4017,6 +4096,7 @@ window.confirmAskCustom = async function() {
 
 window.sendAskCustomOption = async function() {
   if (!chatPanelPid) return;
+  if (guardExternalSend()) return;
   var cur = currentAskQuestion();
   var custom = currentAskCustomOption();
   if (!custom) { startAskCustom('create'); return; }
@@ -4037,7 +4117,7 @@ window.sendAskCustomOption = async function() {
     refreshChatMessages(chatPanelPid);
     setTimeout(function() { if (chatPanelPid) refreshChatMessages(chatPanelPid); }, 2000);
   } catch (e) {
-    alert('发送失败: ' + (e && e.message ? e.message : e));
+    flashFoot('❌ 发送失败: ' + (e && e.message ? e.message : e));
   }
 };
 
@@ -4365,7 +4445,7 @@ async function doLaunchInstance(workdir) {
     flashFoot("🚀 已在 " + (workdir ? workdir : "选定目录") + " 用 " + used + " 启动 claude");
     setTimeout(refresh, 1500); // 加快新实例出现在监控列表
   } catch (e) {
-    alert("启动失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 启动失败: " + (e && e.message ? e.message : e));
   }
 }
 
@@ -4408,14 +4488,16 @@ window.hidePromptModal = function() {
 
 window.sendPrompt = async function() {
   if (!promptTargetPid) return;
+  if (guardExternalSend(promptTargetPid)) return;
   var text = document.getElementById("prompt-input").value.trim();
   if (!text) return;
   try {
+    flashFoot("发送中… PID " + promptTargetPid);
     await Call.ByID(ID_ACT_PROMPT, promptTargetPid, text);
     var display = text.length > 40 ? text.slice(0, 40) + "…" : text;
     flashFoot("✓  已向 PID " + promptTargetPid + " 发送：" + display);
   } catch (e) {
-    alert("发送失败: " + (e && e.message ? e.message : e));
+    flashFoot("❌ 发送失败: " + (e && e.message ? e.message : e));
   }
   hidePromptModal();
 };
@@ -4579,11 +4661,12 @@ window.openTerminalTab = async function(kind, workdir, presetSid) {
   return sid;
 };
 
-// 「＋」新建终端：优先 PowerShell，启动失败回退 CMD。
+// 「＋」新建终端：统一使用 shell kind。
+// macOS/Linux → zsh/bash（经 service buildTerminalCmdlineDarwin 解析 $SHELL）；
+// Windows → PowerShell（service 层 shell kind 仍映射 PowerShell）。不再回退 CMD。
 window.openNewTerminal = async function() {
   var sid = await openTerminalTab("shell", "");
-  if (!sid) sid = await openTerminalTab("cmd", "");
-  if (!sid) flashFoot("启动终端失败：未找到 PowerShell 或 CMD");
+  if (!sid) flashFoot("启动终端失败：未找到可用 shell 终端，请检查终端配置");
 };
 
 // 挂载 xterm 到已登记的 tab（创建 paneEl、Terminal、open、绑事件、回放缓存输出）。幂等。
@@ -5080,7 +5163,7 @@ window.downloadUpdate = async function() {
     flashFoot("没有可用的下载地址");
     return;
   }
-  if (!confirm("确定要下载并安装更新吗？\n\n应用将在下载完成后自动重启。")) return;
+  if (!(await confirmDialog("确定要下载并安装更新吗？\n\n应用将在下载完成后自动重启。", "下载并安装更新"))) return;
 
   var btn = document.getElementById("update-download-btn");
   var bar = document.getElementById("update-progress-bar");

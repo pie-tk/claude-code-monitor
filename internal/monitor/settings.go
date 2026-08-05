@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -48,7 +49,7 @@ func LoadSettings() error {
 		BridgeEnabled:            true,        // 默认启用 statusline 桥接
 		AutoCheckClaudeSettings:  true,        // 默认启用 settings.json 健康检查
 		AutoRepairClaudeSettings: true,        // 默认启用 settings.json 自动修复
-		LaunchWindowMode:         "hide",      // 默认最小化到任务栏（不抢焦点）
+		LaunchWindowMode:         defaultLaunchMode(), // mac 默认内嵌终端（外部窗口实例无法注入/交互）；Windows 默认最小化外部窗口
 		EnterToSend:              true,        // 默认回车直接发送（Shift+Enter 换行）
 		LaunchYolo:               true,        // 默认 yolo 模式（跳过权限确认）
 		SortField:                "updatedAt", // 默认按最后活动排序
@@ -69,7 +70,22 @@ func LoadSettings() error {
 		return nil // 文件不存在 → 用默认值
 	}
 	json.Unmarshal(data, &currentSettings)
+	// 迁移：mac 上外部窗口(hide)实例无法注入/交互，等于丢失核心能力。历史配置（或从 Windows
+	// 拷贝来的配置）若残留 hide，强制校正为 embedded；仅校正内存值，用户下次保存设置时自然落盘。
+	if runtime.GOOS == "darwin" && currentSettings.LaunchWindowMode == "hide" {
+		currentSettings.LaunchWindowMode = defaultLaunchMode()
+	}
 	return nil
+}
+
+// defaultLaunchMode 返回启动模式的平台默认值。
+// mac 只有「应用内置终端」支持输入注入与在 cc-console 内交互；外部窗口（Terminal.app）实例
+// 无法注入，等于丢失工具核心能力，故默认 embedded。Windows 默认 hide（最小化外部窗口，不抢焦点）。
+func defaultLaunchMode() string {
+	if runtime.GOOS == "darwin" {
+		return "embedded"
+	}
+	return "hide"
 }
 
 // writeSettingsToDisk 把设置序列化写回 ~/.cc-console.json。
